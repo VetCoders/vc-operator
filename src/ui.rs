@@ -22,8 +22,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_body(frame, layout[2], app);
     draw_footer(frame, layout[3], app);
 
-    if app.focus == LaunchFocus::Help {
-        draw_help_overlay(frame, app);
+    match app.focus {
+        LaunchFocus::Help => draw_help_overlay(frame, app),
+        LaunchFocus::Search => draw_search_overlay(frame, app),
+        _ => {}
     }
 }
 
@@ -46,9 +48,10 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(title), rows[0]);
 
     let context = format!(
-        "mission root: {}  |  active runs: {}  |  focus: {}",
+        "mission root: {}  |  active runs: {}  |  scope: {}  |  focus: {}",
         app.config.launch_root.to_string_lossy(),
         app.active_run_count(),
+        app.queue_scope.label(),
         app.active_tab().label()
     );
     frame.render_widget(
@@ -126,12 +129,12 @@ fn draw_monitor(frame: &mut Frame, area: Rect, app: &App) {
             (
                 "Filter",
                 vec![
-                    if app.filter_active_only {
-                        "Live-only view".to_string()
+                    format!("{} scope", app.queue_scope.label()),
+                    if app.search_query.is_empty() {
+                        "f cycles live/history/all".to_string()
                     } else {
-                        "Full board".to_string()
+                        format!("/ {}", app.search_query)
                     },
-                    "f toggles queue density".to_string(),
                 ],
                 Color::Cyan,
             ),
@@ -311,7 +314,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 
     let nav_hint = match (app.active_tab(), app.focus) {
         (AppTab::Monitor, _) => {
-            "Monitor: ↑/↓ runs  Tab/Shift+Tab switch tabs  f filter  d controls  ? help"
+            "Monitor: ↑/↓ runs  / search  f scope  x archive  d controls  ? help"
         }
         (AppTab::Dispatch, LaunchFocus::EditPrompt) => {
             "Dispatch edit: type prompt  Backspace delete  Enter/Esc finish  Tab switch tabs"
@@ -328,7 +331,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         rows[0],
     );
 
-    let shortcuts = "Global: q quit  r refresh  a cycle agent  v cycle runtime  ? help";
+    let shortcuts =
+        "Global: q quit  r refresh  a cycle agent  v cycle runtime  Ctrl+L clear search  ? help";
     frame.render_widget(
         Paragraph::new(shortcuts).style(Style::default().fg(Color::DarkGray)),
         rows[1],
@@ -383,12 +387,12 @@ fn draw_runs(frame: &mut Frame, area: Rect, app: &App, emphasize_live: bool) {
             .collect()
     };
 
-    let title = if app.filter_active_only {
-        "Live queue (live-only)"
+    let title = if emphasize_live && !app.search_query.is_empty() {
+        format!("{} (/ {})", app.queue_scope.title(), app.search_query)
     } else if emphasize_live {
-        "Live queue (all)"
+        app.queue_scope.title().to_string()
     } else {
-        "Runs"
+        "Runs".to_string()
     };
     let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(list, area);
@@ -535,6 +539,38 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
     frame.render_widget(help, area);
 }
 
+fn draw_search_overlay(frame: &mut Frame, app: &App) {
+    let area = centered_rect(64, 24, frame.area());
+    frame.render_widget(Clear, area);
+    let query = if app.search_query.is_empty() {
+        "type to filter runs".to_string()
+    } else {
+        app.search_query.clone()
+    };
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("/", Style::default().fg(Color::Yellow)),
+            Span::raw(query),
+        ]),
+        Line::from(""),
+        Line::from(format!(
+            "{} runs visible in {} scope",
+            app.runs.len(),
+            app.queue_scope.label()
+        )),
+        Line::from("Enter/Esc closes. Ctrl+L clears search from browse."),
+    ];
+    let search = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Run search")
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(search, area);
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -558,7 +594,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{DispatchFocus, LaunchFocus};
+    use crate::app::{DispatchFocus, LaunchFocus, QueueScope};
     use crate::config::AppConfig;
     use crate::launch::{LaunchKind, LaunchRuntime};
     use crate::state::{ControlPlaneState, RenderedRun, RunKind, RunSnapshot};
@@ -617,7 +653,8 @@ mod tests {
             status_line: String::new(),
             launch_history: vec!["vc workflow --agent codex".to_string()],
             deep_selected: 0,
-            filter_active_only: false,
+            queue_scope: QueueScope::Live,
+            search_query: String::new(),
         }
     }
 
@@ -640,7 +677,7 @@ mod tests {
         let rendered = render_to_string(&app);
 
         assert!(rendered.contains("Monitor pulse"));
-        assert!(rendered.contains("Live queue (all)"));
+        assert!(rendered.contains("Live queue"));
         assert!(rendered.contains("Run dossier"));
         assert!(rendered.contains("Recent timeline"));
         assert!(!rendered.contains("Dispatch playbook"));

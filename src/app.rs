@@ -4,6 +4,7 @@ use crate::launch::{
 };
 use crate::state::{ControlPlaneState, RenderedRun, RunKind, render_runs};
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +68,40 @@ pub enum LaunchFocus {
     Browse,
     EditPrompt,
     Help,
+    Search,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueScope {
+    Live,
+    History,
+    All,
+}
+
+impl QueueScope {
+    pub fn label(self) -> &'static str {
+        match self {
+            QueueScope::Live => "live",
+            QueueScope::History => "history",
+            QueueScope::All => "all",
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            QueueScope::Live => "Live queue",
+            QueueScope::History => "History",
+            QueueScope::All => "All runs",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            QueueScope::Live => QueueScope::History,
+            QueueScope::History => QueueScope::All,
+            QueueScope::All => QueueScope::Live,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,7 +149,8 @@ pub struct App {
     pub status_line: String,
     pub launch_history: Vec<String>,
     pub deep_selected: usize,
-    pub filter_active_only: bool,
+    pub queue_scope: QueueScope,
+    pub search_query: String,
 }
 
 impl App {
@@ -138,8 +174,10 @@ impl App {
             status_line: String::new(),
             launch_history: Vec::new(),
             deep_selected: 0,
-            filter_active_only: false,
+            queue_scope: QueueScope::Live,
+            search_query: String::new(),
         };
+        apply_run_filters(&mut app.runs, app.queue_scope, &app.search_query);
         app.sync_selection();
         Ok(app)
     }
@@ -149,16 +187,57 @@ impl App {
             .unwrap_or_else(|_| ControlPlaneState::empty(&self.config.state_root));
         self.state = state;
         let mut runs = render_runs(&self.state);
-        if self.filter_active_only {
-            runs.retain(|r| matches!(r.kind, RunKind::Active | RunKind::Stalled | RunKind::Paused));
-        }
+        apply_run_filters(&mut runs, self.queue_scope, &self.search_query);
         self.runs = runs;
         self.sync_selection();
     }
 
     pub fn toggle_filter(&mut self) {
-        self.filter_active_only = !self.filter_active_only;
+        self.queue_scope = self.queue_scope.next();
         self.refresh();
+        self.append_status(format!(
+            "queue scope: {} ({} runs visible)",
+            self.queue_scope.label(),
+            self.runs.len()
+        ));
+    }
+
+    pub fn set_search_query<S: Into<String>>(&mut self, query: S) {
+        self.search_query = query.into();
+        self.refresh();
+    }
+
+    pub fn clear_search(&mut self) {
+        if !self.search_query.is_empty() {
+            self.search_query.clear();
+            self.refresh();
+            self.append_status("search cleared");
+        }
+    }
+
+    pub fn archive_selected_run(&mut self) -> anyhow::Result<()> {
+        let Some(run_id) = self.selected_run().map(|run| run.snapshot.run_id.clone()) else {
+            self.append_status("No run selected to archive.");
+            return Ok(());
+        };
+        let archive_dir = self.config.state_root.join("runs/.archived");
+        fs::create_dir_all(&archive_dir)?;
+        let marker_path = archive_dir.join(format!("{}.json", safe_marker_name(&run_id)));
+        let marker = serde_json::json!({
+            "run_id": run_id,
+            "archived_by": "vc-operator",
+            "archived_at": chrono::Utc::now().to_rfc3339(),
+        });
+        fs::write(&marker_path, serde_json::to_vec_pretty(&marker)?)?;
+        self.refresh();
+        self.append_status(format!(
+            "archived run from operator view: {}",
+            marker
+                .get("run_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown")
+        ));
+        Ok(())
     }
 
     pub fn selected_run(&self) -> Option<&RenderedRun> {
@@ -336,7 +415,7 @@ impl App {
 
     pub fn status_summary(&self) -> String {
         if self.runs.is_empty() {
-            return "no runs loaded yet".to_string();
+            return format!("no {} runs loaded", self.queue_scope.label());
         }
         let mut counts = BTreeMap::new();
         for run in &self.runs {
@@ -468,11 +547,11 @@ impl App {
             ),
             dispatch_line(
                 self.dispatch_focus() == DispatchFocus::Prompt,
-                format!("prompt: {}", self.launch_prompt),
+                format!("prompt: {}", one_line_prompt(&self.launch_prompt)),
             ),
             String::new(),
             "Arrows: ↑/↓ choose field  ←/→ change field  Enter launch".to_string(),
-            "Shortcuts: 1-4 mission  a agent  v runtime  e edit prompt".to_string(),
+            "Shortcuts: 1-4 mission  a agent  v runtime  e edit prompt  / search".to_string(),
             String::new(),
             format!("root: {}", path_display(&self.config.launch_root)),
             format!("command: {}", command_preview),
@@ -508,6 +587,9 @@ impl App {
             "e           edit launch prompt".to_string(),
             "Enter       launch selected action".to_string(),
             "d           selected-run deep controls".to_string(),
+            "f           cycle queue scope: live, history, all".to_string(),
+            "/           search runs by id, agent, skill, status, path".to_string(),
+            "x           archive selected run from the operator view".to_string(),
             "r           refresh control-plane state".to_string(),
             "?           close this guide".to_string(),
             "q / Esc     quit".to_string(),
@@ -525,10 +607,10 @@ impl App {
     }
 
     pub fn tab_labels(&self) -> [String; 3] {
-        let monitor = if self.filter_active_only {
-            format!("Monitor {}/{}", self.active_run_count(), self.runs.len())
+        let monitor = if self.search_query.is_empty() {
+            format!("Monitor {} {}", self.queue_scope.label(), self.runs.len())
         } else {
-            format!("Monitor {}", self.runs.len())
+            format!("Monitor {} {}?", self.queue_scope.label(), self.runs.len())
         };
         let dispatch = format!(
             "Dispatch {}/{}",
@@ -660,4 +742,63 @@ pub fn default_prompt(kind: LaunchKind) -> String {
 
 pub fn agents() -> [&'static str; 3] {
     ["claude", "codex", "gemini"]
+}
+
+fn is_live_run(kind: RunKind) -> bool {
+    matches!(kind, RunKind::Active | RunKind::Stalled | RunKind::Paused)
+}
+
+fn apply_run_filters(runs: &mut Vec<RenderedRun>, queue_scope: QueueScope, search_query: &str) {
+    match queue_scope {
+        QueueScope::Live => runs.retain(|run| is_live_run(run.kind)),
+        QueueScope::History => runs.retain(|run| !is_live_run(run.kind)),
+        QueueScope::All => {}
+    }
+    let query = search_query.trim().to_ascii_lowercase();
+    if !query.is_empty() {
+        runs.retain(|run| run_matches_query(run, &query));
+    }
+}
+
+fn run_matches_query(run: &RenderedRun, query: &str) -> bool {
+    let snapshot = &run.snapshot;
+    [
+        Some(snapshot.run_id.as_str()),
+        snapshot.session_id.as_deref(),
+        snapshot.agent.as_deref(),
+        snapshot.skill.as_deref(),
+        snapshot.mode.as_deref(),
+        snapshot.state.as_deref(),
+        snapshot.status.as_deref(),
+        snapshot.root.as_deref(),
+        snapshot.latest_report.as_deref(),
+        snapshot.latest_transcript.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value.to_ascii_lowercase().contains(query))
+}
+
+fn one_line_prompt(prompt: &str) -> String {
+    let collapsed = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > 96 {
+        let mut short = collapsed.chars().take(93).collect::<String>();
+        short.push_str("...");
+        short
+    } else {
+        collapsed
+    }
+}
+
+fn safe_marker_name(run_id: &str) -> String {
+    run_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }

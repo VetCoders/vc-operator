@@ -5,7 +5,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use tempfile::tempdir;
-use vibecrafted_operator::app::{App, AppTab, DeepAction, DispatchFocus, LaunchFocus};
+use vibecrafted_operator::app::{App, AppTab, DeepAction, DispatchFocus, LaunchFocus, QueueScope};
 use vibecrafted_operator::config::AppConfig;
 use vibecrafted_operator::launch::{
     LaunchKind, LaunchRequest, LaunchRuntime, build_launch_command,
@@ -53,6 +53,34 @@ fn loads_runs_and_events_from_control_plane_state() {
     assert_eq!(state.events.len(), 1);
     assert_eq!(state.runs[0].run_id, "run-a");
     assert_eq!(state.events[0].kind, "heartbeat");
+}
+
+#[test]
+fn archived_run_markers_hide_runs_from_operator_board() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("runs/.archived")).unwrap();
+    fs::write(
+        root.join("runs/run-a.json"),
+        r#"{"run_id":"run-a","state":"active","updated_at":"2026-04-16T10:00:00Z"}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("runs/run-b.json"),
+        r#"{"run_id":"run-b","state":"active","updated_at":"2026-04-16T10:00:00Z"}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("runs/.archived/run-a.json"),
+        r#"{"run_id":"run-a"}"#,
+    )
+    .unwrap();
+
+    let state = ControlPlaneState::load(root).unwrap();
+
+    assert_eq!(state.archived_run_ids.len(), 1);
+    assert_eq!(state.runs.len(), 1);
+    assert_eq!(state.runs[0].run_id, "run-b");
 }
 
 #[test]
@@ -281,7 +309,8 @@ fn deep_controls_expose_attach_resume_and_artifacts() {
         status_line: String::new(),
         launch_history: Vec::new(),
         deep_selected: 0,
-        filter_active_only: false,
+        queue_scope: QueueScope::Live,
+        search_query: String::new(),
     };
 
     assert_eq!(
@@ -322,7 +351,8 @@ fn empty_state_detail_lines_offer_human_quick_start() {
         status_line: String::new(),
         launch_history: Vec::new(),
         deep_selected: 0,
-        filter_active_only: false,
+        queue_scope: QueueScope::Live,
+        search_query: String::new(),
     };
 
     let lines = app.detail_lines();
@@ -354,7 +384,8 @@ fn prompt_lines_include_human_kind_copy_and_command_preview() {
         status_line: String::new(),
         launch_history: Vec::new(),
         deep_selected: 0,
-        filter_active_only: false,
+        queue_scope: QueueScope::Live,
+        search_query: String::new(),
     };
 
     let lines = app.prompt_lines();
@@ -388,7 +419,8 @@ fn tab_navigation_wraps_and_dispatch_focus_tracks_selected_field() {
         status_line: String::new(),
         launch_history: Vec::new(),
         deep_selected: 0,
-        filter_active_only: false,
+        queue_scope: QueueScope::Live,
+        search_query: String::new(),
     };
 
     app.previous_tab();
@@ -451,17 +483,73 @@ fn tab_labels_surface_monitor_dispatch_and_controls_context() {
         status_line: String::new(),
         launch_history: Vec::new(),
         deep_selected: 0,
-        filter_active_only: true,
+        queue_scope: QueueScope::Live,
+        search_query: String::new(),
     };
 
     let labels = app.tab_labels();
-    assert_eq!(labels[0], "Monitor 1/1");
+    assert_eq!(labels[0], "Monitor live 1");
     assert_eq!(labels[1], "Dispatch marbles/gemini");
     assert_eq!(labels[2], "Controls 5");
 
     app.selected = 1;
     let labels = app.tab_labels();
     assert_eq!(labels[2], "Controls -");
+}
+
+#[test]
+fn queue_scope_and_search_filter_the_visible_run_list() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("runs")).unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    fs::write(
+        root.join("runs/active-codex.json"),
+        format!(
+            r#"{{
+                "run_id":"active-codex",
+                "agent":"codex",
+                "state":"active",
+                "updated_at":"{now}",
+                "last_heartbeat":"{now}"
+            }}"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        root.join("runs/done-claude.json"),
+        r#"{
+            "run_id":"done-claude",
+            "agent":"claude",
+            "state":"completed",
+            "updated_at":"2026-04-16T10:00:00Z"
+        }"#,
+    )
+    .unwrap();
+
+    let mut app = App::new(AppConfig {
+        state_root: root.into(),
+        command_deck: "/usr/bin/vibecrafted".into(),
+        launch_root: "/tmp/repo".into(),
+        launch_runtime: LaunchRuntime::Terminal,
+        tick_rate: Duration::from_millis(250),
+    })
+    .unwrap();
+    assert_eq!(app.runs.len(), 1);
+    assert_eq!(app.runs[0].snapshot.run_id, "active-codex");
+
+    app.toggle_filter();
+    assert_eq!(app.queue_scope, QueueScope::History);
+    assert_eq!(app.runs.len(), 1);
+    assert_eq!(app.runs[0].snapshot.run_id, "done-claude");
+
+    app.set_search_query("codex");
+    assert!(app.runs.is_empty());
+
+    app.toggle_filter();
+    assert_eq!(app.queue_scope, QueueScope::All);
+    assert_eq!(app.runs.len(), 1);
+    assert_eq!(app.runs[0].snapshot.run_id, "active-codex");
 }
 
 #[test]
@@ -487,7 +575,8 @@ fn changing_launch_kind_reorients_the_operator_into_dispatch() {
         status_line: String::new(),
         launch_history: Vec::new(),
         deep_selected: 0,
-        filter_active_only: false,
+        queue_scope: QueueScope::Live,
+        search_query: String::new(),
     };
 
     app.set_launch_kind(LaunchKind::Review);

@@ -17,7 +17,7 @@ use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-pub use app::{App, AppTab, DeepAction, DispatchFocus, LaunchFocus};
+pub use app::{App, AppTab, DeepAction, DispatchFocus, LaunchFocus, QueueScope};
 pub use config::{AppConfig, CliOptions, build_config, parse_args};
 pub use launch::{LaunchCommand, LaunchKind};
 
@@ -94,6 +94,31 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             }
             _ => {}
         },
+        LaunchFocus::Search => match key.code {
+            KeyCode::Esc | KeyCode::Enter => {
+                app.focus = LaunchFocus::Browse;
+                if app.search_query.is_empty() {
+                    app.append_status("search closed");
+                } else {
+                    app.append_status(format!(
+                        "search: {} ({} runs visible)",
+                        app.search_query,
+                        app.runs.len()
+                    ));
+                }
+            }
+            KeyCode::Backspace => {
+                let mut query = app.search_query.clone();
+                query.pop();
+                app.set_search_query(query);
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut query = app.search_query.clone();
+                query.push(c);
+                app.set_search_query(query);
+            }
+            _ => {}
+        },
         LaunchFocus::Browse => match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
             KeyCode::Char('?') => app.focus = LaunchFocus::Help,
@@ -109,6 +134,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                 AppTab::Dispatch => app.move_dispatch_selection(1),
                 AppTab::Controls => app.move_deep_selection(1),
             },
+            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.clear_search();
+            }
             KeyCode::Left | KeyCode::Char('h') => match app.active_tab() {
                 AppTab::Monitor => {}
                 AppTab::Dispatch => app.adjust_dispatch_selection(-1),
@@ -134,6 +162,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                 app.cycle_runtime();
             }
             KeyCode::Char('f') => app.toggle_filter(),
+            KeyCode::Char('/') => {
+                app.focus = LaunchFocus::Search;
+                app.append_status("search: type to filter runs, Enter/Esc closes, Ctrl+L clears");
+            }
+            KeyCode::Char('x') => {
+                app.archive_selected_run()?;
+            }
             KeyCode::Char('r') => app.refresh(),
             KeyCode::Char('e') => {
                 app.set_active_tab(AppTab::Dispatch);
@@ -322,7 +357,8 @@ mod tests {
             status_line: String::new(),
             launch_history: Vec::new(),
             deep_selected: 0,
-            filter_active_only: false,
+            queue_scope: QueueScope::Live,
+            search_query: String::new(),
         }
     }
 

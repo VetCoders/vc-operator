@@ -2,7 +2,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,7 @@ pub struct ControlPlaneState {
     pub root: PathBuf,
     pub runs: Vec<RunSnapshot>,
     pub events: Vec<RunEvent>,
+    pub archived_run_ids: HashSet<String>,
 }
 
 impl ControlPlaneState {
@@ -20,12 +21,18 @@ impl ControlPlaneState {
         let Some(root) = SafeControlPlaneRoot::new(root.as_ref())? else {
             return Ok(Self::empty(requested_root));
         };
-        let runs = root.load_runs()?;
+        let archived_run_ids = root.load_archived_run_ids()?;
+        let runs = root
+            .load_runs()?
+            .into_iter()
+            .filter(|snapshot| !archived_run_ids.contains(&snapshot.run_id))
+            .collect();
         let events = root.load_events()?;
         Ok(Self {
             root: root.as_path().to_path_buf(),
             runs,
             events,
+            archived_run_ids,
         })
     }
 
@@ -34,6 +41,7 @@ impl ControlPlaneState {
             root: root.as_ref().to_path_buf(),
             runs: Vec::new(),
             events: Vec::new(),
+            archived_run_ids: HashSet::new(),
         }
     }
 }
@@ -286,6 +294,10 @@ impl SafeControlPlaneRoot {
         self.path.join("events.jsonl")
     }
 
+    fn archived_dir(&self) -> PathBuf {
+        self.runs_dir().join(".archived")
+    }
+
     fn run_snapshot_files(&self) -> io::Result<Vec<PathBuf>> {
         let runs_dir = self.runs_dir();
         let mut files = Vec::new();
@@ -318,6 +330,36 @@ impl SafeControlPlaneRoot {
             }
         }
         Ok(snapshots.into_values().collect())
+    }
+
+    fn archived_marker_files(&self) -> io::Result<Vec<PathBuf>> {
+        let archived_dir = self.archived_dir();
+        let mut files = Vec::new();
+        if !archived_dir.exists() {
+            return Ok(files);
+        }
+        for entry in fs::read_dir(archived_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !is_json_file(&path) {
+                continue;
+            }
+            let Some(path) = self.safe_file(&path)? else {
+                continue;
+            };
+            files.push(path);
+        }
+        Ok(files)
+    }
+
+    fn load_archived_run_ids(&self) -> io::Result<HashSet<String>> {
+        let mut archived = HashSet::new();
+        for path in self.archived_marker_files()? {
+            if let Some(id) = archived_id_from_marker(&path) {
+                archived.insert(id);
+            }
+        }
+        Ok(archived)
     }
 
     fn load_events(&self) -> io::Result<Vec<RunEvent>> {
@@ -362,6 +404,19 @@ impl SafeControlPlaneRoot {
 
 fn is_json_file(path: &Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()) == Some("json")
+}
+
+fn archived_id_from_marker(path: &Path) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    if let Ok(value) = serde_json::from_str::<Value>(&text)
+        && let Some(run_id) = value.get("run_id").and_then(Value::as_str)
+    {
+        return Some(run_id.to_string());
+    }
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn parse_timestamp(raw: &str) -> Option<DateTime<Utc>> {
