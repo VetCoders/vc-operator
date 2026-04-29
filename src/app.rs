@@ -6,7 +6,7 @@ use crate::state::{ControlPlaneState, RenderedRun, RunKind, render_runs};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppTab {
@@ -71,6 +71,7 @@ pub enum LaunchFocus {
     Help,
     Search,
     Error,
+    Artifact,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +156,8 @@ pub struct App {
     pub search_query: String,
     pub error_title: String,
     pub error_lines: Vec<String>,
+    pub artifact_title: String,
+    pub artifact_lines: Vec<String>,
 }
 
 impl App {
@@ -182,6 +185,8 @@ impl App {
             search_query: String::new(),
             error_title: String::new(),
             error_lines: Vec::new(),
+            artifact_title: String::new(),
+            artifact_lines: Vec::new(),
         };
         apply_run_filters(&mut app.runs, app.queue_scope, &app.search_query);
         app.sync_selection();
@@ -403,6 +408,15 @@ impl App {
         lines
     }
 
+    pub fn finish_prompt_edit(&mut self) {
+        self.focus = LaunchFocus::Browse;
+        self.append_status(format!(
+            "prompt updated: {} chars across {} line(s)",
+            self.launch_prompt.chars().count(),
+            self.launch_prompt.lines().count().max(1)
+        ));
+    }
+
     pub fn push_launch_history<S: Into<String>>(&mut self, entry: S) {
         self.launch_history.push(entry.into());
         if self.launch_history.len() > 6 {
@@ -610,8 +624,10 @@ impl App {
             "a           cycle launch agent".to_string(),
             "v           cycle runtime (terminal / visible / headless)".to_string(),
             "e           edit launch prompt".to_string(),
+            "Ctrl+S/Esc  save prompt edits; Enter inserts a prompt newline".to_string(),
             "Enter       launch selected action".to_string(),
             "d           selected-run deep controls".to_string(),
+            "y           copy resume/report/run identity to clipboard".to_string(),
             "f           cycle queue scope: live, history, all".to_string(),
             "/           search runs by id, agent, skill, status, path".to_string(),
             "x           archive selected run from the operator view".to_string(),
@@ -741,6 +757,74 @@ impl App {
         lines
     }
 
+    pub fn prompt_edit_lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            "Prompt editor".to_string(),
+            format!(
+                "{} chars across {} line(s)",
+                self.launch_prompt.chars().count(),
+                self.launch_prompt.lines().count().max(1)
+            ),
+            String::new(),
+        ];
+        if self.launch_prompt.is_empty() {
+            lines.push("Type the worker prompt here.".to_string());
+        } else {
+            lines.extend(self.launch_prompt.lines().map(ToOwned::to_owned));
+        }
+        lines.push(String::new());
+        lines.push("Enter inserts newline. Ctrl+S or Esc saves.".to_string());
+        lines
+    }
+
+    pub fn open_artifact(&mut self, action: &DeepAction) -> anyhow::Result<()> {
+        let (title, path) = match action {
+            DeepAction::OpenReport(path) => ("Report", path),
+            DeepAction::OpenTranscript(path) => ("Transcript", path),
+            DeepAction::OpenRoot(path) => ("Run root", path),
+            _ => return Ok(()),
+        };
+        self.artifact_title = format!("{title}: {}", path_display(path));
+        let run_root = self
+            .selected_run()
+            .and_then(|run| run.snapshot.root.as_deref());
+        self.artifact_lines = artifact_lines(path, run_root)?;
+        self.focus = LaunchFocus::Artifact;
+        self.append_status(format!("opened {} in operator viewer", path_display(path)));
+        Ok(())
+    }
+
+    pub fn artifact_lines(&self) -> Vec<String> {
+        let mut lines = vec![self.artifact_title.clone(), String::new()];
+        lines.extend(self.artifact_lines.clone());
+        lines
+    }
+
+    pub fn clipboard_payload(&self) -> Option<String> {
+        let run = self.selected_run()?;
+        let snapshot = &run.snapshot;
+        if let (Some(agent), Some(session)) =
+            (snapshot.agent.as_deref(), snapshot.session_id.as_deref())
+        {
+            return Some(format!("vibecrafted resume {agent} --session {session}"));
+        }
+        if let Some(report) = snapshot.latest_report.as_deref() {
+            return Some(report.to_string());
+        }
+        Some(snapshot.run_id.clone())
+    }
+
+    pub fn copy_selected_run_to_clipboard(&mut self) -> anyhow::Result<()> {
+        let Some(payload) = self.clipboard_payload() else {
+            self.append_status("No selected run to copy.");
+            return Ok(());
+        };
+        let mut clipboard = arboard::Clipboard::new()?;
+        clipboard.set_text(payload.clone())?;
+        self.append_status(format!("copied to clipboard: {payload}"));
+        Ok(())
+    }
+
     fn launch_env(&self) -> BTreeMap<String, OsString> {
         let mut env = BTreeMap::new();
         env.insert(
@@ -844,4 +928,57 @@ fn safe_marker_name(run_id: &str) -> String {
             }
         })
         .collect()
+}
+
+fn artifact_lines(path: &Path, run_root: Option<&str>) -> anyhow::Result<Vec<String>> {
+    let path = safe_artifact_path(path, run_root)?;
+    if path.is_dir() {
+        let mut rows = Vec::new();
+        // `safe_artifact_path` canonicalizes this path and constrains it to the selected run root.
+        let entries = fs::read_dir(&path)?; // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path
+        for entry in entries {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let suffix = if file_type.is_dir() { "/" } else { "" };
+            rows.push(format!("{}{}", entry.file_name().to_string_lossy(), suffix));
+        }
+        rows.sort();
+        if rows.is_empty() {
+            rows.push("(empty directory)".to_string());
+        }
+        return Ok(rows);
+    }
+    // `safe_artifact_path` canonicalizes this path and constrains it to the selected run root.
+    let text = fs::read_to_string(&path)?; // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path
+    let mut lines = text
+        .lines()
+        .take(400)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if text.lines().count() > 400 {
+        lines.push("[truncated after 400 lines]".to_string());
+    }
+    Ok(lines)
+}
+
+fn safe_artifact_path(path: &Path, run_root: Option<&str>) -> anyhow::Result<PathBuf> {
+    let meta = fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        anyhow::bail!(
+            "refusing to open symlinked artifact: {}",
+            path_display(path)
+        );
+    }
+    let canonical = fs::canonicalize(path)?;
+    let Some(run_root) = run_root.filter(|root| !root.trim().is_empty()) else {
+        anyhow::bail!("selected run has no root; refusing artifact path");
+    };
+    let root = fs::canonicalize(run_root)?;
+    if !canonical.starts_with(&root) {
+        anyhow::bail!(
+            "refusing artifact outside selected run root: {}",
+            path_display(&canonical)
+        );
+    }
+    Ok(canonical)
 }

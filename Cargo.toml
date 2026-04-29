@@ -12,6 +12,7 @@ documentation = "https://docs.rs/vibecrafted-operator"
 
 [dependencies]
 anyhow = "1"
+arboard = "3"
 chrono = { version = "0.4", features = ["serde"] }
 crossterm = "0.29"
 notify = "6"

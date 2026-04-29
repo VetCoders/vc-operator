@@ -24,8 +24,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     match app.focus {
         LaunchFocus::Help => draw_help_overlay(frame, app),
+        LaunchFocus::EditPrompt => draw_prompt_overlay(frame, app),
         LaunchFocus::Search => draw_search_overlay(frame, app),
         LaunchFocus::Error => draw_error_overlay(frame, app),
+        LaunchFocus::Artifact => draw_artifact_overlay(frame, app),
         _ => {}
     }
 }
@@ -318,9 +320,10 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             "Monitor: ↑/↓ runs  / search  f scope  x archive  d controls  ? help"
         }
         (AppTab::Dispatch, LaunchFocus::EditPrompt) => {
-            "Dispatch edit: type prompt  Backspace delete  Enter/Esc finish  Tab switch tabs"
+            "Dispatch edit: type prompt  Enter newline  Ctrl+S/Esc save"
         }
         (_, LaunchFocus::Error) => "Error: Enter/Esc closes the failure details",
+        (_, LaunchFocus::Artifact) => "Artifact viewer: Enter/Esc closes the native viewer",
         (AppTab::Dispatch, _) => {
             "Dispatch: ↑/↓ field  ←/→ change  e edit prompt  Enter launch  1-4 presets"
         }
@@ -333,8 +336,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         rows[0],
     );
 
-    let shortcuts =
-        "Global: q quit  r refresh  a cycle agent  v cycle runtime  Ctrl+L clear search  ? help";
+    let shortcuts = "Global: q quit  r refresh  a cycle agent  v cycle runtime  y copy  Ctrl+L clear search  ? help";
     frame.render_widget(
         Paragraph::new(shortcuts).style(Style::default().fg(Color::DarkGray)),
         rows[1],
@@ -573,6 +575,25 @@ fn draw_search_overlay(frame: &mut Frame, app: &App) {
     frame.render_widget(search, area);
 }
 
+fn draw_prompt_overlay(frame: &mut Frame, app: &App) {
+    let area = centered_rect(76, 60, frame.area());
+    frame.render_widget(Clear, area);
+    let lines = app
+        .prompt_edit_lines()
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    let prompt = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Prompt editor")
+                .border_style(Style::default().fg(Color::Magenta)),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(prompt, area);
+}
+
 fn draw_error_overlay(frame: &mut Frame, app: &App) {
     let area = centered_rect(76, 56, frame.area());
     frame.render_widget(Clear, area);
@@ -590,6 +611,25 @@ fn draw_error_overlay(frame: &mut Frame, app: &App) {
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(error, area);
+}
+
+fn draw_artifact_overlay(frame: &mut Frame, app: &App) {
+    let area = centered_rect(82, 72, frame.area());
+    frame.render_widget(Clear, area);
+    let lines = app
+        .artifact_lines()
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    let artifact = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Artifact viewer")
+                .border_style(Style::default().fg(Color::Green)),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(artifact, area);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -679,6 +719,8 @@ mod tests {
             search_query: String::new(),
             error_title: String::new(),
             error_lines: Vec::new(),
+            artifact_title: String::new(),
+            artifact_lines: Vec::new(),
         }
     }
 

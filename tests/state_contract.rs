@@ -368,6 +368,8 @@ fn deep_controls_expose_attach_resume_and_artifacts() {
         search_query: String::new(),
         error_title: String::new(),
         error_lines: Vec::new(),
+        artifact_title: String::new(),
+        artifact_lines: Vec::new(),
     };
 
     assert_eq!(
@@ -383,6 +385,74 @@ fn deep_controls_expose_attach_resume_and_artifacts() {
             DeepAction::OpenRoot("/tmp/repo".into()),
         ]
     );
+}
+
+#[test]
+fn native_artifact_viewer_reads_files_and_clipboard_payload_prefers_resume_command() {
+    let dir = tempdir().unwrap();
+    let report = dir.path().join("report.md");
+    fs::write(&report, "line one\nline two\n").unwrap();
+    let snapshot = RunSnapshot {
+        run_id: "run-42".to_string(),
+        session_id: Some("sess-42".to_string()),
+        agent: Some("codex".to_string()),
+        skill: Some("workflow".to_string()),
+        mode: Some("implement".to_string()),
+        state: Some("running".to_string()),
+        status: None,
+        started_at: Some("2026-04-16T10:00:00Z".to_string()),
+        updated_at: Some("2026-04-16T10:02:00Z".to_string()),
+        last_heartbeat: Some("2026-04-16T10:03:00Z".to_string()),
+        root: Some(dir.path().to_string_lossy().into_owned()),
+        operator_session: Some("repo-run-42".to_string()),
+        latest_report: Some(report.to_string_lossy().into_owned()),
+        latest_transcript: None,
+        last_error: None,
+        extra: Default::default(),
+    };
+    let run = RenderedRun {
+        snapshot,
+        kind: RunKind::Active,
+        age_label: "1m ago".to_string(),
+        recent_events: Vec::new(),
+    };
+    let mut app = App {
+        config: AppConfig {
+            state_root: "/tmp/state".into(),
+            command_deck: "/usr/bin/vibecrafted".into(),
+            launch_root: "/tmp/repo".into(),
+            launch_runtime: LaunchRuntime::Terminal,
+            terminal_binary: "zellij".into(),
+            tick_rate: Duration::from_millis(250),
+        },
+        state: ControlPlaneState::empty("/tmp/state"),
+        runs: vec![run],
+        selected: 0,
+        active_tab: AppTab::Controls.index(),
+        launch_kind: LaunchKind::Workflow,
+        launch_agent: 0,
+        launch_prompt: "Ship it".to_string(),
+        launch_runtime: LaunchRuntime::Terminal,
+        dispatch_selected: DispatchFocus::Kind as usize,
+        focus: LaunchFocus::Browse,
+        status_line: String::new(),
+        launch_history: Vec::new(),
+        deep_selected: 2,
+        queue_scope: QueueScope::Live,
+        search_query: String::new(),
+        error_title: String::new(),
+        error_lines: Vec::new(),
+        artifact_title: String::new(),
+        artifact_lines: Vec::new(),
+    };
+
+    assert_eq!(
+        app.clipboard_payload().as_deref(),
+        Some("vibecrafted resume codex --session sess-42")
+    );
+    app.open_artifact(&DeepAction::OpenReport(report)).unwrap();
+    assert_eq!(app.focus, LaunchFocus::Artifact);
+    assert!(app.artifact_lines().iter().any(|line| line == "line one"));
 }
 
 #[test]
@@ -413,6 +483,8 @@ fn empty_state_detail_lines_offer_human_quick_start() {
         search_query: String::new(),
         error_title: String::new(),
         error_lines: Vec::new(),
+        artifact_title: String::new(),
+        artifact_lines: Vec::new(),
     };
 
     let lines = app.detail_lines();
@@ -449,6 +521,8 @@ fn prompt_lines_include_human_kind_copy_and_command_preview() {
         search_query: String::new(),
         error_title: String::new(),
         error_lines: Vec::new(),
+        artifact_title: String::new(),
+        artifact_lines: Vec::new(),
     };
 
     let lines = app.prompt_lines();
@@ -487,6 +561,8 @@ fn tab_navigation_wraps_and_dispatch_focus_tracks_selected_field() {
         search_query: String::new(),
         error_title: String::new(),
         error_lines: Vec::new(),
+        artifact_title: String::new(),
+        artifact_lines: Vec::new(),
     };
 
     app.previous_tab();
@@ -554,6 +630,8 @@ fn tab_labels_surface_monitor_dispatch_and_controls_context() {
         search_query: String::new(),
         error_title: String::new(),
         error_lines: Vec::new(),
+        artifact_title: String::new(),
+        artifact_lines: Vec::new(),
     };
 
     let labels = app.tab_labels();
@@ -650,6 +728,8 @@ fn changing_launch_kind_reorients_the_operator_into_dispatch() {
         search_query: String::new(),
         error_title: String::new(),
         error_lines: Vec::new(),
+        artifact_title: String::new(),
+        artifact_lines: Vec::new(),
     };
 
     app.set_launch_kind(LaunchKind::Review);

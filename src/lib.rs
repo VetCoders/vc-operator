@@ -13,7 +13,6 @@ use crossterm::terminal::{
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use std::env;
 use std::io;
 use std::path::Path;
 use std::sync::mpsc::{self, Sender};
@@ -97,13 +96,17 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
 
     match app.focus {
         LaunchFocus::EditPrompt => match key.code {
-            KeyCode::Tab => app.next_tab(),
-            KeyCode::BackTab => app.previous_tab(),
             KeyCode::Char('?') => {
                 app.focus = LaunchFocus::Help;
             }
-            KeyCode::Esc | KeyCode::Enter => {
-                app.focus = LaunchFocus::Browse;
+            KeyCode::Esc => {
+                app.finish_prompt_edit();
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.finish_prompt_edit();
+            }
+            KeyCode::Enter => {
+                app.launch_prompt.push('\n');
             }
             KeyCode::Backspace => {
                 app.launch_prompt.pop();
@@ -139,6 +142,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             _ => {}
         },
         LaunchFocus::Error => match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                app.focus = LaunchFocus::Browse;
+            }
+            _ => {}
+        },
+        LaunchFocus::Artifact => match key.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
                 app.focus = LaunchFocus::Browse;
             }
@@ -193,6 +202,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             }
             KeyCode::Char('x') => {
                 app.archive_selected_run()?;
+            }
+            KeyCode::Char('y') => {
+                if let Err(error) = app.copy_selected_run_to_clipboard() {
+                    app.show_error("clipboard failed", vec![format!("{error:#}")]);
+                }
             }
             KeyCode::Char('r') => app.refresh(),
             KeyCode::Char('e') => {
@@ -269,6 +283,15 @@ fn run_selected_deep_control(app: &mut App) -> anyhow::Result<()> {
         app.focus = LaunchFocus::Browse;
         return Ok(());
     };
+    if matches!(
+        action,
+        DeepAction::OpenReport(_) | DeepAction::OpenTranscript(_) | DeepAction::OpenRoot(_)
+    ) {
+        if let Err(error) = app.open_artifact(&action) {
+            app.show_error("artifact open failed", vec![format!("{error:#}")]);
+        }
+        return Ok(());
+    }
     let command = deep_control_command(app, &action);
     let summary = command.command_line();
     if let Err(error) = suspend_and_run(&command) {
@@ -299,30 +322,10 @@ fn deep_control_command(app: &App, action: &DeepAction) -> LaunchCommand {
             ],
             env: Default::default(),
         },
-        DeepAction::OpenReport(path)
-        | DeepAction::OpenTranscript(path)
-        | DeepAction::OpenRoot(path) => pager_command(path),
+        DeepAction::OpenReport(_) | DeepAction::OpenTranscript(_) | DeepAction::OpenRoot(_) => {
+            unreachable!("artifact actions are handled by the native operator viewer")
+        }
     }
-}
-
-fn pager_command(path: &Path) -> LaunchCommand {
-    let quoted = shell_quote(&path.to_string_lossy());
-    let viewer = env::var("PAGER")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "less".to_string());
-    let command = format!(
-        "if [ -d {quoted} ]; then cd {quoted} && exec ${{SHELL:-/bin/sh}}; elif command -v {viewer} >/dev/null 2>&1; then exec {viewer} {quoted}; else cat {quoted}; fi"
-    );
-    LaunchCommand {
-        program: "sh".into(),
-        args: vec!["-lc".into(), command.into()],
-        env: Default::default(),
-    }
-}
-
-fn shell_quote(raw: &str) -> String {
-    format!("'{}'", raw.replace('\'', "'\"'\"'"))
 }
 
 #[derive(Debug)]
@@ -456,6 +459,8 @@ mod tests {
             search_query: String::new(),
             error_title: String::new(),
             error_lines: Vec::new(),
+            artifact_title: String::new(),
+            artifact_lines: Vec::new(),
         }
     }
 
@@ -526,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_key_controls_can_move_across_run_list_and_prompt_edit_can_tab_out() {
+    fn handle_key_controls_can_move_across_run_list_and_prompt_edit_saves_multiline_prompt() {
         let mut app = sample_app();
         app.set_active_tab(AppTab::Controls);
 
@@ -538,9 +543,12 @@ mod tests {
 
         app.set_active_tab(AppTab::Dispatch);
         app.focus = LaunchFocus::EditPrompt;
-        handle_key(&mut app, key(KeyCode::Tab)).unwrap();
-        assert_eq!(app.active_tab(), AppTab::Controls);
+        handle_key(&mut app, key(KeyCode::Enter)).unwrap();
+        handle_key(&mut app, key(KeyCode::Char('n'))).unwrap();
+        handle_key(&mut app, key(KeyCode::Esc)).unwrap();
+        assert!(app.launch_prompt.contains("\nn"));
         assert_eq!(app.focus, LaunchFocus::Browse);
+        assert!(app.status_line.contains("prompt updated"));
     }
 
     #[test]
