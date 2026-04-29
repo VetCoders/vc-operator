@@ -25,6 +25,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     match app.focus {
         LaunchFocus::Help => draw_help_overlay(frame, app),
         LaunchFocus::Search => draw_search_overlay(frame, app),
+        LaunchFocus::Error => draw_error_overlay(frame, app),
         _ => {}
     }
 }
@@ -319,6 +320,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         (AppTab::Dispatch, LaunchFocus::EditPrompt) => {
             "Dispatch edit: type prompt  Backspace delete  Enter/Esc finish  Tab switch tabs"
         }
+        (_, LaunchFocus::Error) => "Error: Enter/Esc closes the failure details",
         (AppTab::Dispatch, _) => {
             "Dispatch: ↑/↓ field  ←/→ change  e edit prompt  Enter launch  1-4 presets"
         }
@@ -571,6 +573,25 @@ fn draw_search_overlay(frame: &mut Frame, app: &App) {
     frame.render_widget(search, area);
 }
 
+fn draw_error_overlay(frame: &mut Frame, app: &App) {
+    let area = centered_rect(76, 56, frame.area());
+    frame.render_widget(Clear, area);
+    let lines = app
+        .error_lines()
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    let error = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Launch error")
+                .border_style(Style::default().fg(Color::Red)),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(error, area);
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -635,6 +656,7 @@ mod tests {
                 command_deck: "/usr/bin/vibecrafted".into(),
                 launch_root: "/tmp/repo".into(),
                 launch_runtime: LaunchRuntime::Terminal,
+                terminal_binary: "zellij".into(),
                 tick_rate: Duration::from_millis(250),
             },
             state: ControlPlaneState::empty("/tmp/state"),
@@ -655,6 +677,8 @@ mod tests {
             deep_selected: 0,
             queue_scope: QueueScope::Live,
             search_query: String::new(),
+            error_title: String::new(),
+            error_lines: Vec::new(),
         }
     }
 

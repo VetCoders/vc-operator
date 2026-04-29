@@ -1,4 +1,5 @@
 use anyhow::Context;
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -96,6 +97,8 @@ pub struct LaunchRequest {
     pub prompt: String,
     pub runtime: LaunchRuntime,
     pub root: Option<PathBuf>,
+    pub terminal_binary: Option<PathBuf>,
+    pub env: BTreeMap<String, OsString>,
     pub count: Option<u32>,
     pub depth: Option<u32>,
 }
@@ -104,6 +107,7 @@ pub struct LaunchRequest {
 pub struct LaunchCommand {
     pub program: PathBuf,
     pub args: Vec<OsString>,
+    pub env: BTreeMap<String, OsString>,
 }
 
 impl LaunchCommand {
@@ -120,9 +124,30 @@ impl LaunchCommand {
     pub fn spawn(&self) -> anyhow::Result<std::process::Child> {
         let mut command = Command::new(&self.program);
         command.args(&self.args);
+        command.envs(&self.env);
         command.stdin(Stdio::inherit());
         command.stdout(Stdio::inherit());
         command.stderr(Stdio::inherit());
+        command.spawn().context("failed to spawn launch command")
+    }
+
+    pub fn spawn_detached(&self) -> anyhow::Result<std::process::Child> {
+        let mut command = Command::new(&self.program);
+        command.args(&self.args);
+        command.envs(&self.env);
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::null());
+        command.stderr(Stdio::null());
+        command.spawn().context("failed to spawn launch command")
+    }
+
+    pub fn spawn_interactive_with_stderr(&self) -> anyhow::Result<std::process::Child> {
+        let mut command = Command::new(&self.program);
+        command.args(&self.args);
+        command.envs(&self.env);
+        command.stdin(Stdio::inherit());
+        command.stdout(Stdio::inherit());
+        command.stderr(Stdio::piped());
         command.spawn().context("failed to spawn launch command")
     }
 }
@@ -175,6 +200,7 @@ fn build_deck_launch_command(deck: &Path, request: &LaunchRequest) -> LaunchComm
     LaunchCommand {
         program: deck.to_path_buf(),
         args,
+        env: request.env.clone(),
     }
 }
 
@@ -196,8 +222,12 @@ fn build_terminal_launch_command(deck: &Path, request: &LaunchRequest) -> Launch
     args.push(zellij_layout.into());
 
     LaunchCommand {
-        program: "zellij".into(),
+        program: request
+            .terminal_binary
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("zellij")),
         args,
+        env: request.env.clone(),
     }
 }
 
@@ -227,6 +257,14 @@ fn build_pane_shell_command(deck: &Path, request: &LaunchRequest) -> String {
             shell_quote(&config_dir.to_string_lossy())
         ));
     }
+    for (key, value) in &request.env {
+        parts.push(format!(
+            "export {}={}",
+            shell_name(key),
+            shell_quote(&value.to_string_lossy())
+        ));
+    }
+    parts.extend(tooling_profile_snippets());
     parts.push(format!(
         "exec {}",
         shell_join(deck, &build_deck_launch_command(deck, request).args)
@@ -258,6 +296,22 @@ fn shell_join(program: &Path, args: &[OsString]) -> String {
 
 fn shell_quote(raw: &str) -> String {
     format!("'{}'", raw.replace('\'', "'\"'\"'"))
+}
+
+fn shell_name(raw: &str) -> String {
+    raw.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect()
+}
+
+fn tooling_profile_snippets() -> Vec<String> {
+    vec![
+        "if command -v starship >/dev/null 2>&1; then eval \"$(starship init bash)\"; fi"
+            .to_string(),
+        "if command -v zoxide >/dev/null 2>&1; then eval \"$(zoxide init bash)\"; fi".to_string(),
+        "if command -v atuin >/dev/null 2>&1; then eval \"$(atuin init bash --disable-up-arrow)\"; fi"
+            .to_string(),
+    ]
 }
 
 fn kdl_quote(raw: &str) -> String {

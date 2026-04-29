@@ -10,11 +10,13 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::env;
 use std::io;
 use std::path::Path;
+use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
 pub use app::{App, AppTab, DeepAction, DispatchFocus, LaunchFocus, QueueScope};
@@ -36,6 +38,14 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
 
     let result = (|| -> anyhow::Result<()> {
         let mut app = App::new(config)?;
+        let (watch_tx, watch_rx) = mpsc::channel();
+        let _watcher = match start_state_watcher(&app.config.state_root, watch_tx) {
+            Ok(watcher) => Some(watcher),
+            Err(error) => {
+                app.append_status(format!("watcher unavailable: {error}"));
+                None
+            }
+        };
         let mut last_tick = Instant::now();
         loop {
             terminal.draw(|frame| ui::draw(frame, &app))?;
@@ -50,6 +60,15 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
                 && handle_key(&mut app, key)?
             {
                 break;
+            }
+
+            let mut watched_change = false;
+            while watch_rx.try_recv().is_ok() {
+                watched_change = true;
+            }
+            if watched_change {
+                app.refresh();
+                last_tick = Instant::now();
             }
 
             if last_tick.elapsed() >= app.config.tick_rate {
@@ -116,6 +135,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                 let mut query = app.search_query.clone();
                 query.push(c);
                 app.set_search_query(query);
+            }
+            _ => {}
+        },
+        LaunchFocus::Error => match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                app.focus = LaunchFocus::Browse;
             }
             _ => {}
         },
@@ -217,9 +242,23 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
 fn launch_selected(app: &mut App) -> anyhow::Result<()> {
     let command = app.launch_command();
     let summary = command.command_line();
-    suspend_and_run(&command)?;
-    app.push_launch_history(summary.clone());
-    app.append_status(format!("launched: {summary}"));
+    if app.launch_runtime == launch::LaunchRuntime::Headless {
+        match command.spawn_detached() {
+            Ok(child) => {
+                app.push_launch_history(summary.clone());
+                app.append_status(format!("spawned pid {}: {summary}", child.id()));
+            }
+            Err(error) => app.show_error(
+                "launch failed before spawn",
+                vec![format!("{summary}"), format!("{error:#}")],
+            ),
+        }
+    } else if let Err(error) = suspend_and_run(&command) {
+        app.show_error("launch failed", error.detail_lines(summary));
+    } else {
+        app.push_launch_history(summary.clone());
+        app.append_status(format!("launched: {summary}"));
+    }
     app.refresh();
     Ok(())
 }
@@ -232,10 +271,13 @@ fn run_selected_deep_control(app: &mut App) -> anyhow::Result<()> {
     };
     let command = deep_control_command(app, &action);
     let summary = command.command_line();
-    suspend_and_run(&command)?;
-    app.push_launch_history(summary.clone());
-    app.append_status(format!("ran: {summary}"));
-    app.focus = LaunchFocus::Browse;
+    if let Err(error) = suspend_and_run(&command) {
+        app.show_error("action failed", error.detail_lines(summary));
+    } else {
+        app.push_launch_history(summary.clone());
+        app.append_status(format!("ran: {summary}"));
+        app.focus = LaunchFocus::Browse;
+    }
     app.refresh();
     Ok(())
 }
@@ -245,6 +287,7 @@ fn deep_control_command(app: &App, action: &DeepAction) -> LaunchCommand {
         DeepAction::AttachSession(session) => LaunchCommand {
             program: app.config.command_deck.clone(),
             args: vec!["dashboard".into(), "attach".into(), session.clone().into()],
+            env: Default::default(),
         },
         DeepAction::ResumeSession { agent, session } => LaunchCommand {
             program: app.config.command_deck.clone(),
@@ -254,6 +297,7 @@ fn deep_control_command(app: &App, action: &DeepAction) -> LaunchCommand {
                 "--session".into(),
                 session.clone().into(),
             ],
+            env: Default::default(),
         },
         DeepAction::OpenReport(path)
         | DeepAction::OpenTranscript(path)
@@ -273,6 +317,7 @@ fn pager_command(path: &Path) -> LaunchCommand {
     LaunchCommand {
         program: "sh".into(),
         args: vec!["-lc".into(), command.into()],
+        env: Default::default(),
     }
 }
 
@@ -280,13 +325,36 @@ fn shell_quote(raw: &str) -> String {
     format!("'{}'", raw.replace('\'', "'\"'\"'"))
 }
 
-fn suspend_and_run(command: &LaunchCommand) -> anyhow::Result<()> {
-    let mut stdout = io::stdout();
-    disable_raw_mode().context("failed to disable raw mode before launch")?;
-    execute!(stdout, LeaveAlternateScreen)?;
+#[derive(Debug)]
+struct LaunchRunError {
+    message: String,
+    stderr: String,
+}
 
-    let launch_result = match command.spawn() {
-        Ok(mut child) => child.wait().context("launch process failed"),
+impl LaunchRunError {
+    fn detail_lines(&self, summary: String) -> Vec<String> {
+        let mut lines = vec![
+            format!("command: {summary}"),
+            format!("error: {}", self.message),
+        ];
+        if !self.stderr.trim().is_empty() {
+            lines.push(String::new());
+            lines.push("stderr:".to_string());
+            lines.extend(self.stderr.lines().map(ToOwned::to_owned));
+        }
+        lines
+    }
+}
+
+fn suspend_and_run(command: &LaunchCommand) -> Result<(), LaunchRunError> {
+    let mut stdout = io::stdout();
+    disable_raw_mode()
+        .context("failed to disable raw mode before launch")
+        .map_err(launch_error)?;
+    execute!(stdout, LeaveAlternateScreen).map_err(launch_error)?;
+
+    let launch_result = match command.spawn_interactive_with_stderr() {
+        Ok(child) => child.wait_with_output().context("launch process failed"),
         Err(error) => Err(error),
     };
 
@@ -294,10 +362,36 @@ fn suspend_and_run(command: &LaunchCommand) -> anyhow::Result<()> {
         execute!(stdout, EnterAlternateScreen).context("failed to restore alternate screen");
     let raw_result = enable_raw_mode().context("failed to re-enable raw mode after launch");
 
-    leave_result?;
-    raw_result?;
-    launch_result?;
-    Ok(())
+    leave_result.map_err(launch_error)?;
+    raw_result.map_err(launch_error)?;
+    let output = launch_result.map_err(launch_error)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(LaunchRunError {
+            message: format!("command exited with {}", output.status),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+}
+
+fn launch_error(error: impl Into<anyhow::Error>) -> LaunchRunError {
+    let error = error.into();
+    LaunchRunError {
+        message: format!("{error:#}"),
+        stderr: String::new(),
+    }
+}
+
+fn start_state_watcher(path: &Path, tx: Sender<()>) -> anyhow::Result<RecommendedWatcher> {
+    let mut watcher = RecommendedWatcher::new(
+        move |_| {
+            let _ = tx.send(());
+        },
+        NotifyConfig::default(),
+    )?;
+    watcher.watch(path, RecursiveMode::Recursive)?;
+    Ok(watcher)
 }
 
 #[cfg(test)]
@@ -339,6 +433,7 @@ mod tests {
                 command_deck: "/usr/bin/vibecrafted".into(),
                 launch_root: "/tmp/repo".into(),
                 launch_runtime: LaunchRuntime::Terminal,
+                terminal_binary: "zellij".into(),
                 tick_rate: Duration::from_millis(250),
             },
             state: ControlPlaneState::empty("/tmp/state"),
@@ -359,6 +454,8 @@ mod tests {
             deep_selected: 0,
             queue_scope: QueueScope::Live,
             search_query: String::new(),
+            error_title: String::new(),
+            error_lines: Vec::new(),
         }
     }
 

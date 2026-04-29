@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -138,6 +139,8 @@ fn builds_existing_command_deck_launches() {
         prompt: "Investigate the state format.".to_string(),
         runtime: LaunchRuntime::Headless,
         root: Some("/tmp/vibecrafted".into()),
+        terminal_binary: Some("zellij".into()),
+        env: BTreeMap::new(),
         count: Some(3),
         depth: Some(3),
     };
@@ -170,6 +173,8 @@ fn marbles_launches_keep_runtime_root_and_loop_controls() {
         prompt: "Converge on the operator surface.".to_string(),
         runtime: LaunchRuntime::Terminal,
         root: Some(root.to_path_buf()),
+        terminal_binary: Some("zellij".into()),
+        env: BTreeMap::new(),
         count: Some(4),
         depth: Some(7),
     };
@@ -234,6 +239,8 @@ fn terminal_launches_preserve_explicit_zellij_config_dir() {
         prompt: "Ship the launcher.".to_string(),
         runtime: LaunchRuntime::Terminal,
         root: Some("/tmp/workspace".into()),
+        terminal_binary: Some("zellij".into()),
+        env: BTreeMap::new(),
         count: Some(3),
         depth: Some(3),
     };
@@ -260,6 +267,53 @@ fn terminal_launches_preserve_explicit_zellij_config_dir() {
             env::remove_var("ZELLIJ_CONFIG_DIR");
         },
     }
+}
+
+#[test]
+fn launch_commands_propagate_operator_env_and_custom_terminal_binary() {
+    let deck = Path::new("/usr/bin/vibecrafted");
+    let mut env = BTreeMap::new();
+    env.insert("VIBECRAFTED_ROOT".to_string(), "/tmp/repo".into());
+    env.insert(
+        "VIBECRAFT_OPERATOR_STATE_ROOT".to_string(),
+        "/tmp/state".into(),
+    );
+    let request = LaunchRequest {
+        kind: LaunchKind::Workflow,
+        agent: "codex".to_string(),
+        prompt: "Ship launch env.".to_string(),
+        runtime: LaunchRuntime::Terminal,
+        root: Some("/tmp/repo".into()),
+        terminal_binary: Some("/opt/bin/zellij".into()),
+        env,
+        count: Some(3),
+        depth: Some(3),
+    };
+
+    let command = build_launch_command(deck, &request);
+    let args = command
+        .args
+        .iter()
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let layout = args
+        .iter()
+        .position(|value| value == "--layout-string")
+        .and_then(|index| args.get(index + 1))
+        .expect("layout string");
+
+    assert_eq!(command.program, Path::new("/opt/bin/zellij"));
+    assert_eq!(
+        command
+            .env
+            .get("VIBECRAFTED_ROOT")
+            .map(|value| value.as_os_str()),
+        Some(std::ffi::OsStr::new("/tmp/repo"))
+    );
+    assert!(layout.contains("export VIBECRAFTED_ROOT='/tmp/repo'"));
+    assert!(layout.contains("starship init bash"));
+    assert!(layout.contains("zoxide init bash"));
+    assert!(layout.contains("atuin init bash --disable-up-arrow"));
 }
 
 #[test]
@@ -294,6 +348,7 @@ fn deep_controls_expose_attach_resume_and_artifacts() {
             command_deck: "/usr/bin/vibecrafted".into(),
             launch_root: "/tmp/repo".into(),
             launch_runtime: LaunchRuntime::Terminal,
+            terminal_binary: "zellij".into(),
             tick_rate: Duration::from_millis(250),
         },
         state: ControlPlaneState::empty("/tmp/state"),
@@ -311,6 +366,8 @@ fn deep_controls_expose_attach_resume_and_artifacts() {
         deep_selected: 0,
         queue_scope: QueueScope::Live,
         search_query: String::new(),
+        error_title: String::new(),
+        error_lines: Vec::new(),
     };
 
     assert_eq!(
@@ -336,6 +393,7 @@ fn empty_state_detail_lines_offer_human_quick_start() {
             command_deck: "/usr/bin/vibecrafted".into(),
             launch_root: "/tmp/repo".into(),
             launch_runtime: LaunchRuntime::Terminal,
+            terminal_binary: "zellij".into(),
             tick_rate: Duration::from_millis(250),
         },
         state: ControlPlaneState::empty("/tmp/state"),
@@ -353,6 +411,8 @@ fn empty_state_detail_lines_offer_human_quick_start() {
         deep_selected: 0,
         queue_scope: QueueScope::Live,
         search_query: String::new(),
+        error_title: String::new(),
+        error_lines: Vec::new(),
     };
 
     let lines = app.detail_lines();
@@ -369,6 +429,7 @@ fn prompt_lines_include_human_kind_copy_and_command_preview() {
             command_deck: "/usr/bin/vibecrafted".into(),
             launch_root: "/tmp/repo".into(),
             launch_runtime: LaunchRuntime::Terminal,
+            terminal_binary: "zellij".into(),
             tick_rate: Duration::from_millis(250),
         },
         state: ControlPlaneState::empty("/tmp/state"),
@@ -386,6 +447,8 @@ fn prompt_lines_include_human_kind_copy_and_command_preview() {
         deep_selected: 0,
         queue_scope: QueueScope::Live,
         search_query: String::new(),
+        error_title: String::new(),
+        error_lines: Vec::new(),
     };
 
     let lines = app.prompt_lines();
@@ -404,6 +467,7 @@ fn tab_navigation_wraps_and_dispatch_focus_tracks_selected_field() {
             command_deck: "/usr/bin/vibecrafted".into(),
             launch_root: "/tmp/repo".into(),
             launch_runtime: LaunchRuntime::Terminal,
+            terminal_binary: "zellij".into(),
             tick_rate: Duration::from_millis(250),
         },
         state: ControlPlaneState::empty("/tmp/state"),
@@ -421,6 +485,8 @@ fn tab_navigation_wraps_and_dispatch_focus_tracks_selected_field() {
         deep_selected: 0,
         queue_scope: QueueScope::Live,
         search_query: String::new(),
+        error_title: String::new(),
+        error_lines: Vec::new(),
     };
 
     app.previous_tab();
@@ -468,6 +534,7 @@ fn tab_labels_surface_monitor_dispatch_and_controls_context() {
             command_deck: "/usr/bin/vibecrafted".into(),
             launch_root: "/tmp/repo".into(),
             launch_runtime: LaunchRuntime::Terminal,
+            terminal_binary: "zellij".into(),
             tick_rate: Duration::from_millis(250),
         },
         state: ControlPlaneState::empty("/tmp/state"),
@@ -485,6 +552,8 @@ fn tab_labels_surface_monitor_dispatch_and_controls_context() {
         deep_selected: 0,
         queue_scope: QueueScope::Live,
         search_query: String::new(),
+        error_title: String::new(),
+        error_lines: Vec::new(),
     };
 
     let labels = app.tab_labels();
@@ -532,6 +601,7 @@ fn queue_scope_and_search_filter_the_visible_run_list() {
         command_deck: "/usr/bin/vibecrafted".into(),
         launch_root: "/tmp/repo".into(),
         launch_runtime: LaunchRuntime::Terminal,
+        terminal_binary: "zellij".into(),
         tick_rate: Duration::from_millis(250),
     })
     .unwrap();
@@ -560,6 +630,7 @@ fn changing_launch_kind_reorients_the_operator_into_dispatch() {
             command_deck: "/usr/bin/vibecrafted".into(),
             launch_root: "/tmp/repo".into(),
             launch_runtime: LaunchRuntime::Terminal,
+            terminal_binary: "zellij".into(),
             tick_rate: Duration::from_millis(250),
         },
         state: ControlPlaneState::empty("/tmp/state"),
@@ -577,6 +648,8 @@ fn changing_launch_kind_reorients_the_operator_into_dispatch() {
         deep_selected: 0,
         queue_scope: QueueScope::Live,
         search_query: String::new(),
+        error_title: String::new(),
+        error_lines: Vec::new(),
     };
 
     app.set_launch_kind(LaunchKind::Review);

@@ -4,6 +4,7 @@ use crate::launch::{
 };
 use crate::state::{ControlPlaneState, RenderedRun, RunKind, render_runs};
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 
@@ -69,6 +70,7 @@ pub enum LaunchFocus {
     EditPrompt,
     Help,
     Search,
+    Error,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +153,8 @@ pub struct App {
     pub deep_selected: usize,
     pub queue_scope: QueueScope,
     pub search_query: String,
+    pub error_title: String,
+    pub error_lines: Vec<String>,
 }
 
 impl App {
@@ -176,6 +180,8 @@ impl App {
             deep_selected: 0,
             queue_scope: QueueScope::Live,
             search_query: String::new(),
+            error_title: String::new(),
+            error_lines: Vec::new(),
         };
         apply_run_filters(&mut app.runs, app.queue_scope, &app.search_query);
         app.sync_selection();
@@ -365,6 +371,8 @@ impl App {
             prompt: self.launch_prompt.clone(),
             runtime: self.launch_runtime,
             root: Some(self.config.launch_root.clone()),
+            terminal_binary: Some(self.config.terminal_binary.clone()),
+            env: self.launch_env(),
             count: Some(3),
             depth: Some(3),
         }
@@ -376,6 +384,23 @@ impl App {
 
     pub fn append_status<S: Into<String>>(&mut self, status: S) {
         self.status_line = status.into();
+    }
+
+    pub fn show_error<S: Into<String>>(&mut self, title: S, lines: Vec<String>) {
+        self.error_title = title.into();
+        self.error_lines = if lines.is_empty() {
+            vec!["No error detail was captured.".to_string()]
+        } else {
+            lines
+        };
+        self.status_line = self.error_title.clone();
+        self.focus = LaunchFocus::Error;
+    }
+
+    pub fn error_lines(&self) -> Vec<String> {
+        let mut lines = vec![self.error_title.clone(), String::new()];
+        lines.extend(self.error_lines.clone());
+        lines
     }
 
     pub fn push_launch_history<S: Into<String>>(&mut self, entry: S) {
@@ -714,6 +739,24 @@ impl App {
             format!("{prefix} {}", action.label())
         }));
         lines
+    }
+
+    fn launch_env(&self) -> BTreeMap<String, OsString> {
+        let mut env = BTreeMap::new();
+        env.insert(
+            "VIBECRAFTED_ROOT".to_string(),
+            self.config.launch_root.as_os_str().to_os_string(),
+        );
+        env.insert(
+            "VIBECRAFT_OPERATOR_STATE_ROOT".to_string(),
+            self.config.state_root.as_os_str().to_os_string(),
+        );
+        if let Some(config_dir) =
+            std::env::var_os("ZELLIJ_CONFIG_DIR").filter(|value| !value.is_empty())
+        {
+            env.insert("ZELLIJ_CONFIG_DIR".to_string(), config_dir);
+        }
+        env
     }
 }
 

@@ -9,6 +9,7 @@ pub struct CliOptions {
     pub command_deck: Option<PathBuf>,
     pub launch_root: Option<PathBuf>,
     pub launch_runtime: Option<LaunchRuntime>,
+    pub terminal_binary: Option<PathBuf>,
     pub tick_ms: u64,
 }
 
@@ -19,6 +20,7 @@ impl Default for CliOptions {
             command_deck: None,
             launch_root: None,
             launch_runtime: None,
+            terminal_binary: None,
             tick_ms: 250,
         }
     }
@@ -30,6 +32,7 @@ pub struct AppConfig {
     pub command_deck: PathBuf,
     pub launch_root: PathBuf,
     pub launch_runtime: LaunchRuntime,
+    pub terminal_binary: PathBuf,
     pub tick_rate: Duration,
 }
 
@@ -86,6 +89,19 @@ pub fn parse_args() -> anyhow::Result<CliOptions> {
                     .unwrap_or_default();
                 options.launch_runtime = Some(value.parse::<LaunchRuntime>()?);
             }
+            "--terminal-binary" | "--zellij" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--terminal-binary requires a value"))?;
+                options.terminal_binary = Some(PathBuf::from(value));
+            }
+            _ if arg.starts_with("--terminal-binary=") || arg.starts_with("--zellij=") => {
+                let value = arg
+                    .split_once('=')
+                    .map(|(_, value)| value)
+                    .unwrap_or_default();
+                options.terminal_binary = Some(PathBuf::from(value));
+            }
             "--tick-ms" => {
                 let value = args
                     .next()
@@ -108,6 +124,9 @@ pub fn build_config(options: CliOptions) -> AppConfig {
             .launch_root
             .unwrap_or_else(|| default_launch_root(&command_deck)),
         launch_runtime: options.launch_runtime.unwrap_or_default(),
+        terminal_binary: options
+            .terminal_binary
+            .unwrap_or_else(default_terminal_binary),
         command_deck,
         tick_rate: Duration::from_millis(options.tick_ms.max(50)),
     }
@@ -142,6 +161,13 @@ pub fn default_command_deck() -> PathBuf {
         return repo_candidate;
     }
     PathBuf::from("vibecrafted")
+}
+
+pub fn default_terminal_binary() -> PathBuf {
+    env::var_os("VIBECRAFTED_TERMINAL_BINARY")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("zellij"))
 }
 
 pub fn default_launch_root(command_deck: &Path) -> PathBuf {
@@ -181,6 +207,7 @@ fn print_help() {
     println!("  --deck <path>        Command deck binary or script to launch workflows");
     println!("  --root <path>        Workspace root passed through to launched workflows");
     println!("  --runtime <kind>     Launch runtime (headless|terminal|visible)");
+    println!("  --terminal-binary <path>  Terminal multiplexer binary (default: zellij)");
     println!("  --tick-ms <ms>       Refresh cadence for the TUI (default: 250)");
 }
 
