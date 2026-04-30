@@ -49,11 +49,12 @@ actions.
 ## Run
 
 ```bash
-cargo run --manifest-path operator-tui/Cargo.toml -- --state-root "$VIBECRAFTED_HOME/control_plane"
+cargo run -- --state-root "$VIBECRAFTED_HOME/control_plane"
 # optional:
 #   --runtime terminal
 #   --root /path/to/repo
 ```
 
-If you install the crate as a binary, it exposes both `vibecrafted-operator`
-and the shorter `vc-operator` entrypoint.
+The package is `vibecrafted-operator` (manifest at repo root). Built binaries
+are exposed under both `vibecrafted-operator` and the shorter `vc-operator`
+entrypoint.
