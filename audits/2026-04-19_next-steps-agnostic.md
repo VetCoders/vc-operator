@@ -1,12 +1,11 @@
-# Operator TUI: 10-Point Natural Next Steps (Terminal-Agnostic — IMPLEMENTED 2026-04-29)
+# Operator TUI: 10-Point Natural Next Steps (Terminal-Agnostic — COMPLETED 2026-04-30)
 
-> **Status: 9/10 done, 1 boundary point.** Ten terminal-agnostic plan został
-> zrealizowany przez codex 2026-04-29 w commitach `8bc04a9` (queue scope +
-> archive controls), `1d55925` (launch env + failure feedback), `3a3bfbd`
-> (prompt artifact + clipboard ux). Boundary point: zellij socket-level
-> liveness check post-launch (point 7) — wymaga decyzji o stable session id
-> w launch contract. Zachowany jako historical evidence trail per `vc-intents`
-> 2026-04-29 verdict.
+> **Status: 10/10 done.** Ten terminal-agnostic plan został zrealizowany przez
+> codex 2026-04-29 w commitach `8bc04a9` (queue scope + archive controls),
+> `1d55925` (launch env + failure feedback), `3a3bfbd` (prompt artifact +
+> clipboard ux), następnie domknięty przez stable zellij session naming
+> (`8930d05`) i named-session readiness probe 2026-04-30. Zachowany jako
+> historical evidence trail per `vc-intents` 2026-04-29 verdict.
 
 Ten plan traktuje `operator-tui` jako niezależne, samodzielne narzędzie, które żyje wewnątrz dowolnego obecnie używanego emulatora terminala (Ghostty, Alacritty, iTerm2, WezTerm). Skupia się na tym, aby TUI było solidnym pomostem do orkiestracji (Zellij + agenci) bez wymuszania konkretnego okna.
 

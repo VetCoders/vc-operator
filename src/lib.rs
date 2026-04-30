@@ -15,7 +15,9 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::io;
 use std::path::Path;
+use std::process::Output;
 use std::sync::mpsc::{self, Sender};
+use std::thread;
 use std::time::{Duration, Instant};
 
 pub use app::{App, AppTab, DeepAction, DispatchFocus, LaunchFocus, QueueScope};
@@ -357,7 +359,7 @@ fn suspend_and_run(command: &LaunchCommand) -> Result<(), LaunchRunError> {
     execute!(stdout, LeaveAlternateScreen).map_err(launch_error)?;
 
     let launch_result = match command.spawn_interactive_with_stderr() {
-        Ok(child) => child.wait_with_output().context("launch process failed"),
+        Ok(child) => wait_for_interactive_launch(command, child),
         Err(error) => Err(error),
     };
 
@@ -376,6 +378,32 @@ fn suspend_and_run(command: &LaunchCommand) -> Result<(), LaunchRunError> {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
     }
+}
+
+fn wait_for_interactive_launch(
+    command: &LaunchCommand,
+    mut child: std::process::Child,
+) -> anyhow::Result<Output> {
+    if let Some(probe) = command.readiness_probe() {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if probe.is_session_visible().unwrap_or(false) {
+                return child.wait_with_output().context("launch process failed");
+            }
+            if child.try_wait()?.is_some() {
+                let output = child.wait_with_output().context("launch process failed")?;
+                if output.status.success() {
+                    anyhow::bail!(
+                        "zellij session '{}' exited before the readiness probe saw it",
+                        probe.session_name
+                    );
+                }
+                return Ok(output);
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    child.wait_with_output().context("launch process failed")
 }
 
 fn launch_error(error: impl Into<anyhow::Error>) -> LaunchRunError {

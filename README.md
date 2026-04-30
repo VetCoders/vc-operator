@@ -40,7 +40,10 @@ The TUI shells out to the existing `vibecrafted` command deck when you launch a
 workflow, research, review, or marbles run. Launches carry an explicit runtime
 and repo root so the Rust surface stays aligned with the shared control-plane
 launcher contract instead of inheriting whatever shell state happened to start
-the console.
+the console. Terminal and visible launches get a stable zellij session name and
+an immediate readiness probe against `zellij list-sessions --short
+--no-formatting`, so a launch that exits before its named session appears is
+reported as a failure instead of a false success.
 
 Use `v` to cycle `terminal` / `visible` / `headless` launch modes and `d` on a
 selected run to enter deep controls for attach / resume / report / transcript

@@ -111,6 +111,14 @@ pub struct LaunchCommand {
     pub env: BTreeMap<String, OsString>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchReadinessProbe {
+    pub program: PathBuf,
+    pub args: Vec<OsString>,
+    pub env: BTreeMap<String, OsString>,
+    pub session_name: String,
+}
+
 impl LaunchCommand {
     pub fn command_line(&self) -> String {
         let mut parts = vec![self.program.to_string_lossy().into_owned()];
@@ -150,6 +158,43 @@ impl LaunchCommand {
         command.stdout(Stdio::inherit());
         command.stderr(Stdio::piped());
         command.spawn().context("failed to spawn launch command")
+    }
+
+    pub fn readiness_probe(&self) -> Option<LaunchReadinessProbe> {
+        let session_name = self
+            .args
+            .windows(2)
+            .find(|pair| pair.first().is_some_and(|value| value == "--session"))
+            .and_then(|pair| pair.get(1))
+            .map(|value| value.to_string_lossy().into_owned())?;
+        Some(LaunchReadinessProbe {
+            program: self.program.clone(),
+            args: vec![
+                "list-sessions".into(),
+                "--short".into(),
+                "--no-formatting".into(),
+            ],
+            env: self.env.clone(),
+            session_name,
+        })
+    }
+}
+
+impl LaunchReadinessProbe {
+    pub fn is_session_visible(&self) -> anyhow::Result<bool> {
+        let output = Command::new(&self.program)
+            .args(&self.args)
+            .envs(&self.env)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .context("failed to run zellij readiness probe")?;
+        if !output.status.success() {
+            return Ok(false);
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout.lines().any(|line| line.trim() == self.session_name))
     }
 }
 

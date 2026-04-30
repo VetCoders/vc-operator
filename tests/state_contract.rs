@@ -329,6 +329,54 @@ fn terminal_launch_carries_named_session_before_subcommand() {
 }
 
 #[test]
+fn terminal_launch_exposes_named_session_readiness_probe() {
+    let _guard = env_lock().lock().unwrap();
+    let previous = env::var_os("ZELLIJ_CONFIG_DIR");
+    unsafe {
+        env::remove_var("ZELLIJ_CONFIG_DIR");
+    }
+    let deck = Path::new("/usr/bin/vibecrafted");
+    let request = LaunchRequest {
+        kind: LaunchKind::Workflow,
+        agent: "claude".to_string(),
+        prompt: "Ship the launcher.".to_string(),
+        runtime: LaunchRuntime::Terminal,
+        root: Some("/tmp/workspace".into()),
+        terminal_binary: Some("/opt/bin/zellij".into()),
+        env: BTreeMap::new(),
+        count: Some(3),
+        depth: Some(3),
+        session_name: Some("vc-op-workflow-42".to_string()),
+    };
+
+    let command = build_launch_command(deck, &request);
+    let probe = command
+        .readiness_probe()
+        .expect("named terminal launch should expose a readiness probe");
+    let probe_args = probe
+        .args
+        .iter()
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(probe.program, Path::new("/opt/bin/zellij"));
+    assert_eq!(probe.session_name, "vc-op-workflow-42");
+    assert_eq!(
+        probe_args,
+        vec!["list-sessions", "--short", "--no-formatting"]
+    );
+
+    match previous {
+        Some(value) => unsafe {
+            env::set_var("ZELLIJ_CONFIG_DIR", value);
+        },
+        None => unsafe {
+            env::remove_var("ZELLIJ_CONFIG_DIR");
+        },
+    }
+}
+
+#[test]
 fn terminal_launch_omits_session_flag_when_session_name_is_none() {
     let _guard = env_lock().lock().unwrap();
     let previous = env::var_os("ZELLIJ_CONFIG_DIR");
@@ -359,6 +407,10 @@ fn terminal_launch_omits_session_flag_when_session_name_is_none() {
     assert!(
         !args.iter().any(|value| value == "--session"),
         "no --session flag expected when session_name is None: args={args:?}"
+    );
+    assert!(
+        command.readiness_probe().is_none(),
+        "anonymous terminal launches cannot be healthchecked by name"
     );
 
     match previous {
