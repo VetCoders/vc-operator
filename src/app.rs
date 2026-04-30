@@ -380,6 +380,12 @@ impl App {
             env: self.launch_env(),
             count: Some(3),
             depth: Some(3),
+            session_name: match self.launch_runtime {
+                LaunchRuntime::Terminal | LaunchRuntime::Visible => {
+                    Some(default_session_name(self.launch_kind))
+                }
+                LaunchRuntime::Headless => None,
+            },
         }
     }
 
@@ -959,6 +965,15 @@ fn artifact_lines(path: &Path, run_root: Option<&str>) -> anyhow::Result<Vec<Str
         lines.push("[truncated after 400 lines]".to_string());
     }
     Ok(lines)
+}
+
+fn default_session_name(kind: LaunchKind) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| (d.as_millis() % 100_000) as u32)
+        .unwrap_or(0);
+    format!("vc-op-{}-{:05}", kind.label(), suffix)
 }
 
 fn safe_artifact_path(path: &Path, run_root: Option<&str>) -> anyhow::Result<PathBuf> {

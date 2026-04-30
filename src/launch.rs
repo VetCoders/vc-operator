@@ -101,6 +101,7 @@ pub struct LaunchRequest {
     pub env: BTreeMap<String, OsString>,
     pub count: Option<u32>,
     pub depth: Option<u32>,
+    pub session_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,7 +211,15 @@ fn build_terminal_launch_command(deck: &Path, request: &LaunchRequest) -> Launch
 
     let mut args = Vec::new();
 
-    // We are running zellij in-place
+    // Stable session name (when provided) goes before the subcommand so the
+    // operator can `zellij attach <name>` from another terminal and so future
+    // healthcheck paths can target the named socket.
+    if let Some(name) = request.session_name.as_deref() {
+        args.push("--session".into());
+        args.push(name.into());
+    }
+
+    // We are running zellij in-place.
     args.push("options".into());
 
     if let Some(config_dir) = zellij_config_dir {

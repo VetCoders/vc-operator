@@ -143,6 +143,7 @@ fn builds_existing_command_deck_launches() {
         env: BTreeMap::new(),
         count: Some(3),
         depth: Some(3),
+        session_name: None,
     };
     let command = build_launch_command(deck, &request);
     assert_eq!(command.program, deck);
@@ -177,6 +178,7 @@ fn marbles_launches_keep_runtime_root_and_loop_controls() {
         env: BTreeMap::new(),
         count: Some(4),
         depth: Some(7),
+        session_name: None,
     };
     let command = build_launch_command(deck, &request);
     let args = command
@@ -243,6 +245,7 @@ fn terminal_launches_preserve_explicit_zellij_config_dir() {
         env: BTreeMap::new(),
         count: Some(3),
         depth: Some(3),
+        session_name: None,
     };
 
     let command = build_launch_command(deck, &request);
@@ -258,6 +261,105 @@ fn terminal_launches_preserve_explicit_zellij_config_dir() {
         .expect("layout string");
 
     assert!(layout.contains("export ZELLIJ_CONFIG_DIR='/tmp/custom-zellij'"));
+
+    match previous {
+        Some(value) => unsafe {
+            env::set_var("ZELLIJ_CONFIG_DIR", value);
+        },
+        None => unsafe {
+            env::remove_var("ZELLIJ_CONFIG_DIR");
+        },
+    }
+}
+
+#[test]
+fn terminal_launch_carries_named_session_before_subcommand() {
+    let _guard = env_lock().lock().unwrap();
+    let previous = env::var_os("ZELLIJ_CONFIG_DIR");
+    unsafe {
+        env::remove_var("ZELLIJ_CONFIG_DIR");
+    }
+    let deck = Path::new("/usr/bin/vibecrafted");
+    let request = LaunchRequest {
+        kind: LaunchKind::Workflow,
+        agent: "claude".to_string(),
+        prompt: "Ship the launcher.".to_string(),
+        runtime: LaunchRuntime::Terminal,
+        root: Some("/tmp/workspace".into()),
+        terminal_binary: Some("zellij".into()),
+        env: BTreeMap::new(),
+        count: Some(3),
+        depth: Some(3),
+        session_name: Some("vc-op-workflow-42".to_string()),
+    };
+
+    let command = build_launch_command(deck, &request);
+    let args = command
+        .args
+        .iter()
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+    let session_idx = args
+        .iter()
+        .position(|value| value == "--session")
+        .expect("--session flag present when session_name is provided");
+    assert_eq!(
+        args.get(session_idx + 1).map(String::as_str),
+        Some("vc-op-workflow-42")
+    );
+
+    let options_idx = args
+        .iter()
+        .position(|value| value == "options")
+        .expect("options subcommand present");
+    assert!(
+        session_idx < options_idx,
+        "--session must precede the options subcommand: args={args:?}"
+    );
+
+    match previous {
+        Some(value) => unsafe {
+            env::set_var("ZELLIJ_CONFIG_DIR", value);
+        },
+        None => unsafe {
+            env::remove_var("ZELLIJ_CONFIG_DIR");
+        },
+    }
+}
+
+#[test]
+fn terminal_launch_omits_session_flag_when_session_name_is_none() {
+    let _guard = env_lock().lock().unwrap();
+    let previous = env::var_os("ZELLIJ_CONFIG_DIR");
+    unsafe {
+        env::remove_var("ZELLIJ_CONFIG_DIR");
+    }
+    let deck = Path::new("/usr/bin/vibecrafted");
+    let request = LaunchRequest {
+        kind: LaunchKind::Workflow,
+        agent: "claude".to_string(),
+        prompt: "Ship the launcher.".to_string(),
+        runtime: LaunchRuntime::Terminal,
+        root: Some("/tmp/workspace".into()),
+        terminal_binary: Some("zellij".into()),
+        env: BTreeMap::new(),
+        count: Some(3),
+        depth: Some(3),
+        session_name: None,
+    };
+
+    let command = build_launch_command(deck, &request);
+    let args = command
+        .args
+        .iter()
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+    assert!(
+        !args.iter().any(|value| value == "--session"),
+        "no --session flag expected when session_name is None: args={args:?}"
+    );
 
     match previous {
         Some(value) => unsafe {
@@ -288,6 +390,7 @@ fn launch_commands_propagate_operator_env_and_custom_terminal_binary() {
         env,
         count: Some(3),
         depth: Some(3),
+        session_name: None,
     };
 
     let command = build_launch_command(deck, &request);
