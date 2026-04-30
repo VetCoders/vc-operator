@@ -91,10 +91,31 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_monitor(frame: &mut Frame, area: Rect, app: &App) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(12)])
-        .split(area);
+    let mux_lines = app.mux_status_lines();
+    let mux_height = if mux_lines.is_empty() {
+        0
+    } else {
+        // header + entries + 2 (top + bottom border). Capped so a noisy mux
+        // setup with many services cannot starve the run table; the panel
+        // scrolls with `Wrap` past the cap.
+        (mux_lines.len() as u16 + 2).clamp(3, 10)
+    };
+
+    let rows = if mux_lines.is_empty() {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(5), Constraint::Min(12)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(5),
+                Constraint::Length(mux_height),
+                Constraint::Min(8),
+            ])
+            .split(area)
+    };
 
     draw_stat_strip(
         frame,
@@ -144,10 +165,17 @@ fn draw_monitor(frame: &mut Frame, area: Rect, app: &App) {
         ],
     );
 
+    let body_idx = if mux_lines.is_empty() {
+        1
+    } else {
+        draw_mux_panel(frame, rows[1], &mux_lines, app.mux_summaries.len());
+        2
+    };
+
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(36), Constraint::Percentage(64)])
-        .split(rows[1]);
+        .split(rows[body_idx]);
 
     draw_runs(frame, body[0], app, true);
 
@@ -157,6 +185,46 @@ fn draw_monitor(frame: &mut Frame, area: Rect, app: &App) {
         .split(body[1]);
     draw_detail(frame, right[0], app, "Run dossier");
     draw_events(frame, right[1], app, "Recent timeline");
+}
+
+fn draw_mux_panel(frame: &mut Frame, area: Rect, lines: &[String], total_services: usize) {
+    let any_unhealthy = lines.iter().any(|line| line.contains("! "));
+    let title_color = if any_unhealthy {
+        Color::Red
+    } else {
+        Color::Green
+    };
+    let title_text = format!(" rust-mux ({total_services}) ");
+    let block = Block::default()
+        .title(Span::styled(
+            title_text,
+            Style::default()
+                .fg(title_color)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL);
+    let body_lines: Vec<Line> = lines
+        .iter()
+        .map(|raw| {
+            if let Some(rest) = raw.strip_prefix("  ! ") {
+                Line::from(vec![
+                    Span::styled("  ! ", Style::default().fg(Color::Red)),
+                    Span::raw(rest.to_string()),
+                ])
+            } else if let Some(rest) = raw.strip_prefix("  • ") {
+                Line::from(vec![
+                    Span::styled("  • ", Style::default().fg(Color::Green)),
+                    Span::raw(rest.to_string()),
+                ])
+            } else {
+                Line::from(raw.clone())
+            }
+        })
+        .collect();
+    let para = Paragraph::new(body_lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(para, area);
 }
 
 fn draw_dispatch(frame: &mut Frame, area: Rect, app: &App) {
@@ -761,6 +829,93 @@ mod tests {
         assert!(rendered.contains("Dispatch playbook"));
         assert!(rendered.contains("Launch trail"));
         assert!(!rendered.contains("Control actions"));
+    }
+
+    #[test]
+    fn monitor_tab_renders_mux_panel_when_summaries_exist() {
+        use crate::mux::{MuxStatusSnapshot, MuxSummary};
+        use std::path::PathBuf;
+        let healthy_json = r#"{
+            "service_name": "general-memory",
+            "server_status": "Running",
+            "restarts": 0,
+            "connected_clients": 2,
+            "active_clients": 1,
+            "max_active_clients": 5,
+            "pending_requests": 0,
+            "cached_initialize": true,
+            "initializing": false,
+            "queue_depth": 0,
+            "child_pid": 4242,
+            "max_request_bytes": 1048576,
+            "restart_backoff_ms": 1000,
+            "restart_backoff_max_ms": 30000,
+            "max_restarts": 5
+        }"#;
+        let failed_json = r#"{
+            "service_name": "brave-search",
+            "server_status": {"Failed": "max restarts reached"},
+            "restarts": 5,
+            "connected_clients": 0,
+            "active_clients": 0,
+            "max_active_clients": 5,
+            "pending_requests": 0,
+            "cached_initialize": false,
+            "initializing": false,
+            "queue_depth": 0,
+            "max_request_bytes": 1048576,
+            "restart_backoff_ms": 1000,
+            "restart_backoff_max_ms": 30000,
+            "max_restarts": 5
+        }"#;
+
+        let mut app = sample_app();
+        app.mux_summaries = vec![
+            MuxSummary::from_path_and_result(
+                PathBuf::from("/tmp/memory.json"),
+                MuxStatusSnapshot::from_json(healthy_json),
+            ),
+            MuxSummary::from_path_and_result(
+                PathBuf::from("/tmp/brave.json"),
+                MuxStatusSnapshot::from_json(failed_json),
+            ),
+        ];
+
+        let rendered = render_to_string(&app);
+
+        assert!(
+            rendered.contains("rust-mux"),
+            "panel title must mark this as the rust-mux surface"
+        );
+        assert!(
+            rendered.contains("(2)") || rendered.contains("(1/2 need attention)"),
+            "panel must surface either total count or attention header: {rendered}"
+        );
+        assert!(
+            rendered.contains("general-memory"),
+            "healthy service must render verbatim"
+        );
+        assert!(
+            rendered.contains("brave-search"),
+            "failed service must render verbatim"
+        );
+        assert!(
+            rendered.contains("Failed"),
+            "failed status must surface in the panel"
+        );
+        // Existing Monitor sections must still be present underneath.
+        assert!(rendered.contains("Run dossier"));
+        assert!(rendered.contains("Recent timeline"));
+    }
+
+    #[test]
+    fn monitor_tab_skips_mux_panel_when_summaries_empty() {
+        let app = sample_app();
+        let rendered = render_to_string(&app);
+        assert!(
+            !rendered.contains("rust-mux"),
+            "no panel should render when there are no mux summaries"
+        );
     }
 
     #[test]
