@@ -807,11 +807,7 @@ impl App {
             self.launch_kind.label(),
             self.selected_agent()
         );
-        let controls = if self.selected_run().is_some() {
-            format!("Controls {}", self.deep_actions().len())
-        } else {
-            format!("Controls {}", self.deep_actions().len())
-        };
+        let controls = format!("Controls {}", self.deep_actions().len());
         [monitor, dispatch, controls]
     }
 
