@@ -96,7 +96,8 @@ pub fn current_intents_from_home(home: &Path, _launch_root: &Path) -> Vec<Polari
 }
 
 pub fn read_intent(path: &Path) -> anyhow::Result<PolarizeIntent> {
-    let text = fs::read_to_string(path)
+    let path = safe_prism_file(path)?;
+    let text = fs::read_to_string(&path)
         .with_context(|| format!("failed to read prism payload {}", path.display()))?;
     let payload: PrismPayload = serde_json::from_str(&text)
         .with_context(|| format!("failed to parse prism payload {}", path.display()))?;
@@ -120,12 +121,13 @@ pub fn read_intent(path: &Path) -> anyhow::Result<PolarizeIntent> {
         band,
         score,
         run_id,
-        prism_path: path.to_path_buf(),
+        prism_path: path,
     })
 }
 
 pub fn prism_preview_lines(path: &Path) -> anyhow::Result<Vec<String>> {
-    let text = fs::read_to_string(path)
+    let path = safe_prism_file(path)?;
+    let text = fs::read_to_string(&path)
         .with_context(|| format!("failed to read prism payload {}", path.display()))?;
     let mut lines = text
         .lines()
@@ -156,8 +158,8 @@ fn collect_prisms(path: &Path, depth: usize, files: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let entry_path = entry.path();
         if entry_path.file_name().and_then(|value| value.to_str()) == Some("prism.json") {
-            if is_polarize_prism(&entry_path) && is_safe_file(&entry_path) {
-                files.push(entry_path);
+            if let Ok(path) = safe_prism_file(&entry_path) {
+                files.push(path);
             }
             continue;
         }
@@ -167,11 +169,24 @@ fn collect_prisms(path: &Path, depth: usize, files: &mut Vec<PathBuf>) {
     }
 }
 
-fn is_safe_file(path: &Path) -> bool {
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return false;
-    };
-    !meta.file_type().is_symlink() && path.is_file()
+fn safe_prism_file(path: &Path) -> anyhow::Result<PathBuf> {
+    if path.file_name().and_then(|value| value.to_str()) != Some("prism.json") {
+        anyhow::bail!("refusing non-prism payload {}", path.display());
+    }
+    let meta = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect prism payload {}", path.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        anyhow::bail!("refusing unsafe prism payload {}", path.display());
+    }
+    let canonical = fs::canonicalize(path)
+        .with_context(|| format!("failed to canonicalize prism payload {}", path.display()))?;
+    if !is_polarize_prism(&canonical) {
+        anyhow::bail!(
+            "refusing non-polarize prism payload {}",
+            canonical.display()
+        );
+    }
+    Ok(canonical)
 }
 
 fn is_polarize_prism(path: &Path) -> bool {

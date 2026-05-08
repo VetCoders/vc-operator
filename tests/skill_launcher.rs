@@ -141,3 +141,33 @@ fn polarize_intent_ingests_prism_payload_and_renders_band_action() {
     let intents = current_intents_from_home(home.path(), Path::new("/tmp/repo"));
     assert_eq!(intents, vec![intent]);
 }
+
+#[test]
+fn polarize_intent_discovery_skips_malformed_prisms_without_hiding_valid_intents() {
+    let home = tempdir().unwrap();
+    let valid_prism = home
+        .path()
+        .join("artifacts/VetCoders/vc-operator/2026_0508/polarize/polr-valid/prism.json");
+    let malformed_prism = home
+        .path()
+        .join("artifacts/VetCoders/vc-operator/2026_0508/polarize/polr-bad/prism.json");
+    fs::create_dir_all(valid_prism.parent().unwrap()).unwrap();
+    fs::create_dir_all(malformed_prism.parent().unwrap()).unwrap();
+    fs::write(
+        &valid_prism,
+        r#"{"schema_version":"loctree.prism.v1","total_score":9,"run_id":"polr-valid"}"#,
+    )
+    .unwrap();
+    fs::write(
+        &malformed_prism,
+        r#"{"schema_version":"loctree.prism.v1","total_score":"bad"}"#,
+    )
+    .unwrap();
+
+    assert!(read_intent(&malformed_prism).is_err());
+    let intents = current_intents_from_home(home.path(), Path::new("/tmp/repo"));
+
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0].run_id, "polr-valid");
+    assert_eq!(intents[0].band, PolarizeBand::Pass);
+}
