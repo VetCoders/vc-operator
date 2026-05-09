@@ -374,6 +374,11 @@ pub struct LaunchRunError {
     /// run" (bad flags, socket/config errors, missing binary). When None,
     /// the probe either succeeded or was never attempted.
     pub probe_error: Option<String>,
+    /// Deadline-specific diagnostic captured when the readiness loop kills
+    /// the launch child. This keeps the operator-visible timeout from losing
+    /// the final probe context just because stderr is intentionally not
+    /// drained after SIGKILL.
+    pub probe_error_at_deadline: Option<String>,
 }
 
 impl LaunchRunError {
@@ -384,6 +389,9 @@ impl LaunchRunError {
         ];
         if let Some(probe_error) = &self.probe_error {
             lines.push(format!("readiness probe: {probe_error}"));
+        }
+        if let Some(deadline) = &self.probe_error_at_deadline {
+            lines.push(format!("readiness timeout: {deadline}"));
         }
         if !self.stderr.trim().is_empty() {
             lines.push(String::new());
@@ -421,6 +429,7 @@ fn suspend_and_run(command: &LaunchCommand) -> Result<(), LaunchRunError> {
             message: format!("command exited with {}", output.status),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             probe_error: None,
+            probe_error_at_deadline: None,
         })
     }
 }
@@ -438,6 +447,7 @@ pub fn wait_for_interactive_launch(
     if let Some(probe) = command.readiness_probe() {
         let deadline = Instant::now() + READINESS_DEADLINE;
         let mut probe_error: Option<String> = None;
+        let mut last_probe_error: Option<String> = None;
         while Instant::now() < deadline {
             match probe.is_session_visible() {
                 Ok(true) => {
@@ -445,17 +455,20 @@ pub fn wait_for_interactive_launch(
                         message: format!("launch process failed: {err}"),
                         stderr: String::new(),
                         probe_error: probe_error.clone(),
+                        probe_error_at_deadline: None,
                     });
                 }
                 Ok(false) => {}
                 Err(error) => {
+                    let diagnostic = format!("{error:#}");
                     // Preserve the FIRST probe error (P2-02). Bad flags,
                     // socket/config errors, or permission failures should
                     // surface in the error overlay instead of being
                     // collapsed into a generic "session not visible".
                     if probe_error.is_none() {
-                        probe_error = Some(format!("{error:#}"));
+                        probe_error = Some(diagnostic.clone());
                     }
+                    last_probe_error = Some(diagnostic);
                 }
             }
             match child.try_wait() {
@@ -464,6 +477,7 @@ pub fn wait_for_interactive_launch(
                         message: format!("launch process failed: {err}"),
                         stderr: String::new(),
                         probe_error: probe_error.clone(),
+                        probe_error_at_deadline: None,
                     })?;
                     if output.status.success() {
                         return Err(LaunchRunError {
@@ -473,6 +487,7 @@ pub fn wait_for_interactive_launch(
                             ),
                             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
                             probe_error,
+                            probe_error_at_deadline: None,
                         });
                     }
                     return Ok(output);
@@ -483,6 +498,7 @@ pub fn wait_for_interactive_launch(
                         message: format!("failed to inspect launch child: {err}"),
                         stderr: String::new(),
                         probe_error,
+                        probe_error_at_deadline: None,
                     });
                 }
             }
@@ -508,6 +524,12 @@ pub fn wait_for_interactive_launch(
         // blocks only on the direct child's exit, which the kill
         // guarantees promptly.
         let _ = child.wait();
+        let deadline_diagnostic = last_probe_error.map(|error| {
+            format!(
+                "killed after {}ms, last probe error: {error}",
+                READINESS_DEADLINE.as_millis()
+            )
+        });
         return Err(LaunchRunError {
             message: format!(
                 "zellij session '{}' did not appear within the {}ms readiness window",
@@ -516,12 +538,14 @@ pub fn wait_for_interactive_launch(
             ),
             stderr: String::new(),
             probe_error,
+            probe_error_at_deadline: deadline_diagnostic,
         });
     }
     child.wait_with_output().map_err(|err| LaunchRunError {
         message: format!("launch process failed: {err}"),
         stderr: String::new(),
         probe_error: None,
+        probe_error_at_deadline: None,
     })
 }
 
@@ -531,6 +555,7 @@ fn launch_error(error: impl Into<anyhow::Error>) -> LaunchRunError {
         message: format!("{error:#}"),
         stderr: String::new(),
         probe_error: None,
+        probe_error_at_deadline: None,
     }
 }
 
@@ -720,6 +745,7 @@ mod tests {
             probe_error: Some(
                 "failed to run zellij readiness probe: No such file or directory".to_string(),
             ),
+            probe_error_at_deadline: None,
         };
         let lines = error.detail_lines("zellij --session foo".to_string());
         assert_eq!(lines[0], "command: zellij --session foo");
@@ -739,6 +765,7 @@ mod tests {
             message: "command exited with status: 2".to_string(),
             stderr: String::new(),
             probe_error: None,
+            probe_error_at_deadline: None,
         };
         let lines = error.detail_lines("zellij --session foo".to_string());
         assert!(

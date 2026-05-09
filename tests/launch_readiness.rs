@@ -131,6 +131,10 @@ fn quick_child_exit_before_visibility_reports_session_exited() {
         "session name must appear in the error: {}",
         error.message
     );
+    assert!(
+        error.probe_error_at_deadline.is_none(),
+        "deadline without probe stderr should not invent diagnostics"
+    );
 }
 
 #[test]
@@ -206,6 +210,16 @@ fn probe_failure_surfaces_in_launch_error() {
         probe_error.contains("probe config not found"),
         "probe stderr should be surfaced verbatim: {probe_error}"
     );
+    let deadline_probe_error = error
+        .probe_error_at_deadline
+        .clone()
+        .expect("deadline kill must keep the final probe diagnostic");
+    assert!(
+        deadline_probe_error.contains("killed after 2000ms")
+            && deadline_probe_error.contains("last probe error:")
+            && deadline_probe_error.contains("probe config not found"),
+        "deadline diagnostic should name the kill and last probe error: {deadline_probe_error}"
+    );
     // Detail lines render the probe diagnostic in the operator overlay.
     let detail = error.detail_lines("zellij ...".to_string());
     assert!(
@@ -214,5 +228,11 @@ fn probe_failure_surfaces_in_launch_error() {
             .any(|line| line.starts_with("readiness probe:")
                 && line.contains("probe config not found")),
         "probe error must show in the overlay detail block: {detail:?}"
+    );
+    assert!(
+        detail.iter().any(
+            |line| line.starts_with("readiness timeout:") && line.contains("last probe error:")
+        ),
+        "deadline diagnostic must show in the overlay detail block: {detail:?}"
     );
 }
