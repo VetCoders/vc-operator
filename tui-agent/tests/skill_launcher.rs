@@ -12,18 +12,13 @@ use vibecrafted_operator::skills_catalog::{
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 
-#[test]
-fn catalog_covers_existing_vibecrafted_skill_directories() {
-    // The operator workspace is a standalone extraction; first-class skills
-    // live in the vibecrafted skill kit, which is not bundled with this
-    // repo. Resolve the skill source via, in order: VIBECRAFTED_SKILLS_ROOT
-    // env override, a sibling `vibecrafted/skills/` next to the workspace,
-    // or a colocated `skills/` for legacy monorepo checkouts. When none
-    // exist, the integrity contract is verified by checking emphasis only —
-    // CATALOG-vs-filesystem parity becomes a no-op rather than a false
-    // failure in extracted environments.
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let candidates: Vec<PathBuf> = std::env::var_os("VIBECRAFTED_SKILLS_ROOT")
+enum SkillRootResolution {
+    Found(PathBuf),
+    Missing(Vec<PathBuf>),
+}
+
+fn skill_root_candidates(manifest_dir: &Path) -> Vec<PathBuf> {
+    std::env::var_os("VIBECRAFTED_SKILLS_ROOT")
         .map(PathBuf::from)
         .into_iter()
         .chain(manifest_dir.parent().map(|root| {
@@ -37,58 +32,92 @@ fn catalog_covers_existing_vibecrafted_skill_directories() {
                 .and_then(Path::parent)
                 .map(|root| root.join("skills")),
         )
-        .collect();
+        .collect()
+}
 
-    let skill_root = candidates
-        .iter()
-        .find(|path| {
-            path.is_dir()
-                && fs::read_dir(path)
-                    .map(|entries| {
-                        entries.filter_map(Result::ok).any(|entry| {
-                            entry
-                                .file_name()
-                                .to_str()
-                                .is_some_and(|name| name.starts_with("vc-"))
-                                && entry.path().join("SKILL.md").is_file()
-                        })
-                    })
-                    .unwrap_or(false)
-        })
-        .cloned();
-
-    if let Some(skill_root) = skill_root {
-        let mut existing = fs::read_dir(&skill_root)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", skill_root.display()))
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let path = entry.path();
-                if path.join("SKILL.md").is_file() {
-                    entry.file_name().to_str().map(ToOwned::to_owned)
-                } else {
-                    None
-                }
+fn has_skill_entries(path: &Path) -> bool {
+    path.is_dir()
+        && fs::read_dir(path)
+            .map(|entries| {
+                entries.filter_map(Result::ok).any(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("vc-"))
+                        && entry.path().join("SKILL.md").is_file()
+                })
             })
-            .filter(|name| name.starts_with("vc-"))
-            .collect::<BTreeSet<_>>();
-        existing.remove("foundations");
-        // `vc-operator` is the orchestrator doctrine charter that this
-        // workspace itself implements; it is intentionally not launchable
-        // from the operator UI (recursion / category error) and so does
-        // not appear in CATALOG.
-        existing.remove("vc-operator");
+            .unwrap_or(false)
+}
 
-        let catalog = CATALOG
-            .iter()
-            .map(|entry| entry.slug.to_string())
-            .collect::<BTreeSet<_>>();
+fn resolve_skill_root(manifest_dir: &Path) -> SkillRootResolution {
+    let candidates = skill_root_candidates(manifest_dir);
+    if let Some(path) = candidates.iter().find(|path| has_skill_entries(path)) {
+        SkillRootResolution::Found(path.clone())
+    } else {
+        SkillRootResolution::Missing(candidates)
+    }
+}
 
-        assert_eq!(
-            catalog,
-            existing,
-            "CATALOG drift vs {}",
-            skill_root.display()
-        );
+#[test]
+fn catalog_covers_existing_vibecrafted_skill_directories() {
+    // The operator workspace is a standalone extraction; first-class skills
+    // live in the vibecrafted skill kit, which is not bundled with this
+    // repo. Resolve the skill source via, in order: VIBECRAFTED_SKILLS_ROOT
+    // env override, a sibling `vibecrafted/skills/` next to the workspace,
+    // or a colocated `skills/` for legacy monorepo checkouts. When none
+    // exist, the integrity contract is verified by checking emphasis only —
+    // CATALOG-vs-filesystem parity becomes a no-op rather than a false
+    // failure in extracted environments.
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    match resolve_skill_root(manifest_dir) {
+        SkillRootResolution::Found(skill_root) => {
+            let mut existing = fs::read_dir(&skill_root)
+                .unwrap_or_else(|err| panic!("failed to read {}: {err}", skill_root.display()))
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    if path.join("SKILL.md").is_file() {
+                        entry.file_name().to_str().map(ToOwned::to_owned)
+                    } else {
+                        None
+                    }
+                })
+                .filter(|name| name.starts_with("vc-"))
+                .collect::<BTreeSet<_>>();
+            existing.remove("foundations");
+            // `vc-operator` is the orchestrator doctrine charter that this
+            // workspace itself implements; it is intentionally not launchable
+            // from the operator UI (recursion / category error) and so does
+            // not appear in CATALOG.
+            existing.remove("vc-operator");
+
+            let catalog = CATALOG
+                .iter()
+                .map(|entry| entry.slug.to_string())
+                .collect::<BTreeSet<_>>();
+
+            assert_eq!(
+                catalog,
+                existing,
+                "CATALOG drift vs {}",
+                skill_root.display()
+            );
+        }
+        SkillRootResolution::Missing(candidates) => {
+            assert!(
+                !candidates.is_empty(),
+                "skills-root candidate list is empty"
+            );
+            eprintln!(
+                "standalone skills topology: no skill root found; checked {}",
+                candidates
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
     }
 
     assert!(
